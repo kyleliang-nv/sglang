@@ -292,6 +292,7 @@ class SchedulerDisaggregationPrefillMixin:
                 self.self_check_during_idle()
 
             self.last_batch = batch
+            self.check_profile_stop()
             # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
             # Otherwise, it hangs under high concurrency
             self.running_batch.batch_is_full = False
@@ -340,6 +341,7 @@ class SchedulerDisaggregationPrefillMixin:
                 self.self_check_during_idle()
 
             self.last_batch = batch
+            self.check_profile_stop()
             # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
             # Otherwise, it hangs under high concurrency
             self.running_batch.batch_is_full = False
