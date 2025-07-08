@@ -131,6 +131,7 @@ from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.metrics.collector import SchedulerMetricsCollector, SchedulerStats
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
+from sglang.srt.model_loader.pyt_hooks import ANNAProfControl
 from sglang.srt.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -471,6 +472,11 @@ class Scheduler(
         self.profile_steps: Optional[int] = None
         self.profile_in_progress: bool = False
         self.rpd_profiler = None
+        self.profiler_start_iters, self.profiler_stop_iters = (
+            self._get_profiler_iteration_index_env_var("SGLANG_PROFILE_START_STOP")
+        )
+
+        self.forward_sleep_time = None
 
         # Init metrics stats
         self.init_metrics()
@@ -776,6 +782,7 @@ class Scheduler(
                 self.process_batch_result(
                     tmp_batch, tmp_result, batch.launch_done if batch else None
                 )
+                self.check_profile_stop()
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.check_memory()
@@ -1257,11 +1264,13 @@ class Scheduler(
 
         num_new_seq = len(can_run_list)
         f = (
-            f"Prefill batch. "
+            f"Prefill batch. iter: {self.forward_ct+1}. "
             f"#new-seq: {num_new_seq}, "
             f"#new-token: {adder.log_input_tokens}, "
             f"#cached-token: {adder.log_hit_tokens}, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
+            f"#running-req: {running_bs}, "
+            f"timestamp: {time.time()} "
         )
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -1314,7 +1323,7 @@ class Scheduler(
             )
 
         msg = (
-            f"Decode batch. "
+            f"Decode batch. iter: {self.forward_ct}. "
             f"#running-req: {num_running_reqs}, "
             f"#token: {num_used}, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
@@ -1338,7 +1347,8 @@ class Scheduler(
         msg += (
             f"cuda graph: {can_run_cuda_graph}, "
             f"gen throughput (token/s): {self.last_gen_throughput:.2f}, "
-            f"#queue-req: {len(self.waiting_queue)}"
+            f"#queue-req: {len(self.waiting_queue)} "
+            f"timestamp: {time.time()}"
         )
 
         logger.info(msg)
@@ -1661,6 +1671,26 @@ class Scheduler(
         batch.prepare_for_decode()
         return batch
 
+    enable_pyt_hooks = False
+
+    def check_profile_start(self):
+        if (self.forward_ct) in self.profiler_start_iters and not self.enable_pyt_hooks:
+            logger.info(
+                f"profile_step [{self.attn_tp_rank}-{self.tp_rank}]. iter: {self.forward_ct}. Start profiling. start:{self.profiler_start_iters:}, end:{self.profiler_stop_iters:}"
+            )
+            assert not self.enable_pyt_hooks, "Inconsistent CUDA profiling state"
+            ANNAProfControl.profiler_start()
+            self.enable_pyt_hooks = True
+
+    def check_profile_stop(self):
+        if self.forward_ct in self.profiler_stop_iters and self.enable_pyt_hooks:
+            logger.info(
+                f"profile_step [{self.attn_tp_rank}-{self.tp_rank}]. iter: {self.forward_ct}. Stop profiling. start:{self.profiler_start_iters:}, end:{self.profiler_stop_iters:}"
+            )
+            assert self.enable_pyt_hooks, "Inconsistent CUDA profiling state"
+            ANNAProfControl.profiler_stop(exit_program=False)
+            self.enable_pyt_hooks = False
+
     def run_batch(
         self, batch: ScheduleBatch
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
@@ -1669,6 +1699,7 @@ class Scheduler(
 
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
+
         if self.forward_sleep_time is not None:
             logger.info(f"Scheduler.run_batch sleep {self.forward_sleep_time}s")
             time.sleep(self.forward_sleep_time)
@@ -2509,6 +2540,8 @@ class Scheduler(
             else:
                 raise RuntimeError(f"unsupported profile stage: {batch.forward_mode}")
         else:
+            self.check_profile_start()
+
             # Check profiler
             if (
                 self.profiler_target_forward_ct
@@ -2566,6 +2599,32 @@ class Scheduler(
             if events:
                 batch = KVEventBatch(ts=time.time(), events=events)
                 self.kv_event_publisher.publish(batch)
+
+    def _get_profiler_iteration_index_env_var(
+        self, name: str
+    ) -> Tuple[frozenset[int], frozenset[int]]:
+        spans = os.environ.get(name, None)
+        starts, stops = [], []
+
+        if spans:
+            spans = spans.split(",")
+
+            for span in spans:
+                try:
+                    if "-" in span:
+                        start, stop = span.strip().split("-")
+                        starts.append(int(start))
+                        stops.append(int(stop))
+                    else:
+                        it = int(span.strip())
+                        starts.append(it)
+                        stops.append(it)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Cannot parse span in environment variable `{env_var}`: {e}"
+                    ) from None
+
+        return frozenset(starts), frozenset(stops)
 
 
 def is_health_check_generate_req(recv_req):
