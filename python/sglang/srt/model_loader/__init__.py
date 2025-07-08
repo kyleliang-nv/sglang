@@ -6,6 +6,7 @@ from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.model_loader.loader import BaseModelLoader, get_model_loader
+from sglang.srt.model_loader.pyt_hooks import PytHooks
 from sglang.srt.model_loader.utils import (
     get_architecture_class_name,
     get_model_architecture,
@@ -19,10 +20,15 @@ def get_model(
     device_config: DeviceConfig,
 ) -> nn.Module:
     loader = get_model_loader(load_config)
-    return loader.load_model(
+    sgl_model = loader.load_model(
         model_config=model_config,
         device_config=device_config,
     )
+
+    print("Enable PytHooks!\n")
+    hooks = PytHooks()
+    hooks.register_hooks(sgl_model, model_config.model_path)
+    return sgl_model
 
 
 __all__ = [
