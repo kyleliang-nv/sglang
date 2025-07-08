@@ -2,12 +2,13 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
 from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileReqType
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.model_loader.pyt_hooks import ANNAProfControl
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ class SchedulerProfilerMixin:
         self.profile_steps: Optional[int] = None
         self.profile_in_progress: bool = False
         self.rpd_profiler = None
+        self.profiler_start_iters, self.profiler_stop_iters = (
+            self._get_profiler_iteration_index_env_var("SGLANG_PROFILE_START_STOP")
+        )
 
     def init_profile(
         self,
@@ -238,6 +242,8 @@ class SchedulerProfilerMixin:
             else:
                 raise RuntimeError(f"unsupported profile stage: {batch.forward_mode}")
         else:
+            self.check_profile_start()
+
             # Check profiler
             if (
                 self.profiler_target_forward_ct
@@ -277,3 +283,49 @@ class SchedulerProfilerMixin:
                 return self.start_profile(True)
         else:
             return self.stop_profile()
+
+    def _get_profiler_iteration_index_env_var(
+        self, name: str
+    ) -> Tuple[frozenset[int], frozenset[int]]:
+        spans = os.environ.get(name, None)
+        starts, stops = [], []
+
+        if spans:
+            spans = spans.split(",")
+
+            for span in spans:
+                try:
+                    if "-" in span:
+                        start, stop = span.strip().split("-")
+                        starts.append(int(start))
+                        stops.append(int(stop))
+                    else:
+                        it = int(span.strip())
+                        starts.append(it)
+                        stops.append(it)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Cannot parse span in environment variable `{env_var}`: {e}"
+                    ) from None
+
+        return frozenset(starts), frozenset(stops)
+
+    enable_pyt_hooks = False
+
+    def check_profile_start(self):
+        if (self.forward_ct) in self.profiler_start_iters and not self.enable_pyt_hooks:
+            logger.info(
+                f"profile_step [{self.attn_tp_rank}-{self.tp_rank}]. iter: {self.forward_ct}. Start profiling. start:{self.profiler_start_iters:}, end:{self.profiler_stop_iters:}"
+            )
+            assert not self.enable_pyt_hooks, "Inconsistent CUDA profiling state"
+            ANNAProfControl.profiler_start()
+            self.enable_pyt_hooks = True
+
+    def check_profile_stop(self):
+        if self.forward_ct in self.profiler_stop_iters and self.enable_pyt_hooks:
+            logger.info(
+                f"profile_step [{self.attn_tp_rank}-{self.tp_rank}]. iter: {self.forward_ct}. Stop profiling. start:{self.profiler_start_iters:}, end:{self.profiler_stop_iters:}"
+            )
+            assert self.enable_pyt_hooks, "Inconsistent CUDA profiling state"
+            ANNAProfControl.profiler_stop(exit_program=False)
+            self.enable_pyt_hooks = False
