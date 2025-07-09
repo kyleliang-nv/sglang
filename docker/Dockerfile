@@ -88,7 +88,6 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
     datamodel_code_generator \
-    mooncake_transfer_engine==0.3.4.post2 \
     pre-commit \
     pytest \
     black \
@@ -97,6 +96,16 @@ RUN python3 -m pip install --no-cache-dir \
     uv \
     wheel \
     scikit-build-core
+
+RUN git clone https://github.com/kvcache-ai/Mooncake.git && \
+    cd Mooncake && \
+    git checkout cd3d3340f62d9cfdf060d61a5a0726ccc53eeaca && \
+    bash dependencies.sh && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DUSE_MNNVL=ON \
+    make -j && \
+    sudo make install
 
 # Install development tools and utilities
 RUN apt-get update && apt-get install -y \
