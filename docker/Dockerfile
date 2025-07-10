@@ -52,7 +52,6 @@ COPY . /sgl-workspace/sglang
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5lib six \
  && cd sglang \
  && case "$CUDA_VERSION" in \
-      12.6.1) CUINDEX=126 ;; \
       12.8.1) CUINDEX=128 ;; \
       *) echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 ;; \
     esac \
@@ -95,17 +94,88 @@ RUN python3 -m pip install --no-cache-dir \
     icdiff \
     uv \
     wheel \
-    scikit-build-core
+    scikit-build-core \
+    httpx \
+    openai
 
-RUN git clone https://github.com/kvcache-ai/Mooncake.git && \
-    cd Mooncake && \
-    git checkout cd3d3340f62d9cfdf060d61a5a0726ccc53eeaca && \
-    bash dependencies.sh && \
-    mkdir build && \
-    cd build && \
-    cmake .. -DUSE_MNNVL=ON \
+#RUN git clone https://github.com/kvcache-ai/Mooncake.git && \
+#    cd Mooncake && \
+#    git checkout cd3d3340f62d9cfdf060d61a5a0726ccc53eeaca && \
+#    bash dependencies.sh && \
+#    mkdir build && \
+#    cd build && \
+#    cmake .. -DUSE_MNNVL=ON \
+#    make -j && \
+#    sudo make install
+
+# --- NIXL ARM based install ---
+# For now we skip installing GDS (I hit an error during install and have not had time to debug)
+# These ARM installation steps come from https://github.com/ai-dynamo/dynamo/blob/main/container/Dockerfile.vllm_v1
+RUN apt-get update -y && \
+    apt-get install -y \
+    cmake \
+    meson \
+    ninja-build \
+    pybind11-dev \
+    clang \
+    libclang-dev \
+    git \
+    autoconf \
+    libtool \
+    build-essential
+
+# Install RDMA/UCX dependencies
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers
+# Build UCX from source
+ARG NIXL_UCX_REF=v1.19.x
+RUN rm -rf /opt/hpcx/ucx || true && \
+    rm -rf /usr/local/ucx || true && \
+    cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx && \
+    git checkout $NIXL_UCX_REF && \
+    ./autogen.sh && ./configure \
+    --prefix=/usr/local/ucx \
+    --enable-shared \
+    --disable-static \
+    --disable-doxygen-doc \
+    --enable-optimizations \
+    --enable-cma \
+    --enable-devel-headers \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs \
+    --with-efa \
+    --with-dm \
+    --with-gdrcopy=/usr/local \
+    --enable-mt && \
     make -j && \
-    sudo make install
+    make -j install-strip && \
+    ldconfig
+# Set UCX environment
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+# 0.3.1 release pinned commit
+RUN git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
+    cd /opt/nixl && \
+    git checkout 16348080f5bdeb9fe6058a23be140cec020ef3f3
+RUN uv pip install meson
+RUN cd /opt/nixl && \
+    mkdir build && \
+    meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+    cd build/ && \
+    ninja && \
+    ninja install
+# Install NIXL Python wheel
+RUN cd /opt/nixl && \
+    uv build . --out-dir /tmp/nixl-wheels && \
+    uv pip install /tmp/nixl-wheels/*.whl && \
+    rm -rf /tmp/nixl-wheels
+# Set NIXL environment
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/aarch64-linux-gnu:/usr/local/nixl/lib/aarch64-linux-gnu/plugins:$LD_LIBRARY_PATH
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/aarch64-linux-gnu/plugins
+
 
 # Install development tools and utilities
 RUN apt-get update && apt-get install -y \
