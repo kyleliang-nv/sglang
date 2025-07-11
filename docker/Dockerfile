@@ -150,17 +150,13 @@ RUN cd /opt/nixl && \
     ninja install
 
 # Install NIXL Python wheel
-RUN cd /opt/nixl && \
-    python3 -m pip install build && \
-    python3 -m build . --outdir /tmp/nixl-wheels && \
-    python3 -m pip install /tmp/nixl-wheels/*.whl && \
+RUN pip install build && \
+    cd /opt/nixl && \
+    python -m build --wheel --outdir /tmp/nixl-wheels && \
+    pip install /tmp/nixl-wheels/*.whl && \
     rm -rf /tmp/nixl-wheels
 
-# Install NIXL Python wheel
-RUN cd /opt/nixl && \
-    uv build . --out-dir /tmp/nixl-wheels && \
-    uv pip install /tmp/nixl-wheels/*.whl && \
-    rm -rf /tmp/nixl-wheels
+
 
 # Set NIXL environment
 # FIXME: This is hard-coding to aarch64
