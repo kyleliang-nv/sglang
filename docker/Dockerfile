@@ -46,7 +46,6 @@ WORKDIR /sgl-workspace
 # We are using https://github.com/sgl-project/sglang/pull/7569
 RUN git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
-    git checkout 3d7cdb2ebd89413ecfec4dad27456f994f1ee7ee && \
     python3 -m pip install -e "python[blackwell]"
 # --- Install nightly PyTorch ---
 RUN python3 -m pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
