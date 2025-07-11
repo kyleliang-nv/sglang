@@ -67,7 +67,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
  && git clone https://github.com/deepseek-ai/DeepEP.git \
  && tar -xf nvshmem_src_3.2.5-1.txz && mv nvshmem_src nvshmem \
  && cd nvshmem \
- && git apply /sgl-workspace/DeepEP/third-party/nvshmem.patch \
+ && git clone https://github.com/fzyzcjy/DeepEP.git -b feat/ac4937  \
  && sed -i '1i#include <unistd.h>' examples/moe_shuffle.cu \
  && rm -f /sgl-workspace/nvshmem_src_3.2.5-1.txz \
  && if [ "$BUILD_TYPE" = "blackwell" ]; then CUDA_ARCH=100; else CUDA_ARCH=90; fi \
