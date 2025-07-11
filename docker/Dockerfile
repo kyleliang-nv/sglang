@@ -84,6 +84,10 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
  && if [ "$BUILD_TYPE" = "blackwell" ]; then export TORCH_CUDA_ARCH_LIST="10.0"; fi \
  && NVSHMEM_DIR=${NVSHMEM_DIR} pip install .
 
+# --Install UV ---
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
     datamodel_code_generator \
