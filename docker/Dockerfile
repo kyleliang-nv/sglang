@@ -140,7 +140,7 @@ RUN git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
     cd /opt/nixl && \
     git checkout 16348080f5bdeb9fe6058a23be140cec020ef3f3
 
-RUN python3 -m pip install meson
+RUN python3 -m pip install "meson>=0.64.0"
 
 RUN cd /opt/nixl && \
     mkdir build && \
