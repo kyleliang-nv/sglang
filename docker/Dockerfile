@@ -4,9 +4,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
     NVSHMEM_DIR=/sgl-workspace/nvshmem/install
-# --Install UV ---
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 # --- System dependencies ---
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
  && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
@@ -45,25 +42,18 @@ RUN mkdir -p /tmp/gdrcopy && cd /tmp \
 #RUN ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
 # --- Create workspace ---
 WORKDIR /sgl-workspace
-# --- Python venv ---
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/dynamo && \
-    uv venv /sgl-workspace/venv --python 3.10
-# Activate virtual environment
-ENV VIRTUAL_ENV=/sgl-workspace/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # --- Clone & install sglang ---
 # We are using https://github.com/sgl-project/sglang/pull/7569
 RUN git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
     git checkout 3d7cdb2ebd89413ecfec4dad27456f994f1ee7ee && \
-    uv pip install -e "python[blackwell]"
+    python3 -m pip install -e "python[blackwell]"
 # --- Install nightly PyTorch ---
-RUN uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
+RUN python3 -m pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
 # --- Install sgl_kernel ---
-RUN uv pip install https://github.com/sgl-project/whl/releases/download/v0.2.0/sgl_kernel-0.2.0+cu128-cp39-abi3-manylinux2014_aarch64.whl
+RUN python3 -m pip install https://github.com/sgl-project/whl/releases/download/v0.2.0/sgl_kernel-0.2.0+cu128-cp39-abi3-manylinux2014_aarch64.whl
 # --- torch sanity check ---
-RUN uv pip show torch
+RUN python3 -m pip show torch
 # --- Download & build NVSHMEM (before DeepEP to enable cache reuse) ---
 RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/source/nvshmem_src_3.2.5-1.txz \
  && git clone https://github.com/deepseek-ai/DeepEP.git \
@@ -82,10 +72,10 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
     NVSHMEM_USE_GDRCOPY=1 \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=100 \
  && cmake --build build --target install -j
-RUN uv pip show torch
+RUN python3 -m pip show torch
 RUN cd /sgl-workspace/DeepEP && DEEPEP_NVCC_LINEINFO=1 CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST=10.0 NVSHMEM_DIR=${NVSHMEM_DIR} python3 setup.py install
 # --- Misc Python tools ---
-RUN uv pip install typer httpx openai netifaces
+RUN python3 -m pip install typer httpx openai netifaces
 # -- Install VIM ---
 RUN apt update && apt install -y vim
 # --- NIXL ARM based install ---
@@ -139,7 +129,7 @@ ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 RUN git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
     cd /opt/nixl && \
     git checkout 16348080f5bdeb9fe6058a23be140cec020ef3f3
-RUN uv pip install meson
+RUN python3 -m pip install meson
 RUN cd /opt/nixl && \
     mkdir build && \
     meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
@@ -148,8 +138,9 @@ RUN cd /opt/nixl && \
     ninja install
 # Install NIXL Python wheel
 RUN cd /opt/nixl && \
-    uv build . --out-dir /tmp/nixl-wheels && \
-    uv pip install /tmp/nixl-wheels/*.whl && \
+    python3 -m pip install build && \
+    python3 -m build . --outdir /tmp/nixl-wheels && \
+    python3 -m pip install /tmp/nixl-wheels/*.whl && \
     rm -rf /tmp/nixl-wheels
 # Set NIXL environment
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/aarch64-linux-gnu:/usr/local/nixl/lib/aarch64-linux-gnu/plugins:$LD_LIBRARY_PATH
