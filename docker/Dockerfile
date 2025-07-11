@@ -156,14 +156,16 @@ RUN cd /opt/nixl && \
     python3 -m pip install /tmp/nixl-wheels/*.whl && \
     rm -rf /tmp/nixl-wheels
 
-# Set NIXL environment (architecture-aware)
-RUN ARCH=$(uname -m) && \
-    echo "export LD_LIBRARY_PATH=/usr/local/nixl/lib/\${ARCH}-linux-gnu:/usr/local/nixl/lib/\${ARCH}-linux-gnu/plugins:\$LD_LIBRARY_PATH" >> /etc/environment && \
-    echo "export NIXL_PLUGIN_DIR=/usr/local/nixl/lib/\${ARCH}-linux-gnu/plugins" >> /etc/environment
+# Install NIXL Python wheel
+RUN cd /opt/nixl && \
+    uv build . --out-dir /tmp/nixl-wheels && \
+    uv pip install /tmp/nixl-wheels/*.whl && \
+    rm -rf /tmp/nixl-wheels
 
-# Set default environment variables (will be overridden by /etc/environment at runtime)
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu:/usr/local/nixl/lib/x86_64-linux-gnu/plugins:/usr/local/nixl/lib/aarch64-linux-gnu:/usr/local/nixl/lib/aarch64-linux-gnu/plugins:$LD_LIBRARY_PATH
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
+# Set NIXL environment
+# FIXME: This is hard-coding to aarch64
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/aarch64-linux-gnu:/usr/local/nixl/lib/aarch64-linux-gnu/plugins:$LD_LIBRARY_PATH
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/aarch64-linux-gnu/plugins
 
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
