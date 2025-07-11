@@ -157,8 +157,13 @@ RUN cd /opt/nixl && \
     rm -rf /tmp/nixl-wheels
 
 # Set NIXL environment (architecture-aware)
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/$(uname -m)-linux-gnu:/usr/local/nixl/lib/$(uname -m)-linux-gnu/plugins:$LD_LIBRARY_PATH
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/$(uname -m)-linux-gnu/plugins
+RUN ARCH=$(uname -m) && \
+    echo "export LD_LIBRARY_PATH=/usr/local/nixl/lib/\${ARCH}-linux-gnu:/usr/local/nixl/lib/\${ARCH}-linux-gnu/plugins:\$LD_LIBRARY_PATH" >> /etc/environment && \
+    echo "export NIXL_PLUGIN_DIR=/usr/local/nixl/lib/\${ARCH}-linux-gnu/plugins" >> /etc/environment
+
+# Set default environment variables (will be overridden by /etc/environment at runtime)
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu:/usr/local/nixl/lib/x86_64-linux-gnu/plugins:/usr/local/nixl/lib/aarch64-linux-gnu:/usr/local/nixl/lib/aarch64-linux-gnu/plugins:$LD_LIBRARY_PATH
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
 
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
