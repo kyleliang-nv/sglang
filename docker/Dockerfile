@@ -85,8 +85,8 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
  && NVSHMEM_DIR=${NVSHMEM_DIR} pip install .
 
 # --Install UV ---
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+#RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+#RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
@@ -164,7 +164,7 @@ ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 RUN git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
     cd /opt/nixl && \
     git checkout 16348080f5bdeb9fe6058a23be140cec020ef3f3
-RUN uv pip install meson
+RUN pip install meson
 RUN cd /opt/nixl && \
     mkdir build && \
     meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
@@ -173,8 +173,8 @@ RUN cd /opt/nixl && \
     ninja install
 # Install NIXL Python wheel
 RUN cd /opt/nixl && \
-    uv build . --out-dir /tmp/nixl-wheels && \
-    uv pip install /tmp/nixl-wheels/*.whl && \
+    build . --out-dir /tmp/nixl-wheels && \
+    pip install /tmp/nixl-wheels/*.whl && \
     rm -rf /tmp/nixl-wheels
 # Set NIXL environment
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/aarch64-linux-gnu:/usr/local/nixl/lib/aarch64-linux-gnu/plugins:$LD_LIBRARY_PATH
