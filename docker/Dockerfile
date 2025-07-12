@@ -67,6 +67,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
  && git clone https://github.com/fzyzcjy/DeepEP.git \
  && cd DeepEP \
  && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
+ && cd .. \
  && tar -xf nvshmem_src_3.2.5-1.txz && mv nvshmem_src nvshmem \
  && cd nvshmem \
  && git apply /sgl-workspace/DeepEP/third-party/nvshmem.patch \
