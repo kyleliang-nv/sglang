@@ -5,7 +5,8 @@ ARG BUILD_TYPE=all
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
-    NVSHMEM_DIR=/sgl-workspace/nvshmem/install
+    NVSHMEM_DIR=/sgl-workspace/nvshmem/install \
+    BUILD_TYPE=${BUILD_TYPE}
 
 # Set timezone and install all packages
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
