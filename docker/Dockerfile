@@ -62,6 +62,9 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5li
       python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v0.2.4/sgl_kernel-0.2.4+cu128-cp39-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
     fi
 
+# --- Install SGLang missing package
+RUN pip install netifaces
+
 # --- Install nightly PyTorch ---
 RUN pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
 
@@ -82,6 +85,9 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
     NVSHMEM_USE_GDRCOPY=1 \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=100 \
  && cmake --build build --target install -j
+
+# This seems to be needed to build NVSHMEM
+RUN apt install -y python3-venv
 
 # Build and install DeepEP, which is dependent on NVSHMEM
 RUN git clone https://github.com/fzyzcjy/DeepEP.git \
