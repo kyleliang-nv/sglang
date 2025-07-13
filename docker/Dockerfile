@@ -1,5 +1,6 @@
 ARG CUDA_VERSION=12.6.1
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
+#FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04/
+FROM nvcr.io/nvidia/cuda-dl-base:25.03-cuda12.8-devel-ubuntu24.04
 
 ARG BUILD_TYPE=all
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -18,9 +19,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     python3 python3-pip python3-dev libpython3-dev \
     build-essential cmake \
     libopenmpi-dev libnuma1 libnuma-dev \
-    libibverbs-dev libibverbs1 libibumad3 \
-    librdmacm1 libnl-3-200 libnl-route-3-200 libnl-route-3-dev libnl-3-dev \
-    ibverbs-providers infiniband-diags perftest \
+    libibverbs-dev \
+    libnl-route-3-dev libnl-3-dev \
     libgoogle-glog-dev libgtest-dev libjsoncpp-dev libunwind-dev \
     libboost-all-dev libssl-dev \
     libgrpc-dev libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc \
@@ -71,7 +71,6 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
  && tar -xf nvshmem_src_3.2.5-1.txz && mv nvshmem_src nvshmem \
  && cd nvshmem \
  && git apply /sgl-workspace/DeepEP/third-party/nvshmem.patch \
- && sed -i '1i#include <unistd.h>' examples/moe_shuffle.cu \
  && rm -f /sgl-workspace/nvshmem_src_3.2.5-1.txz \
  && NVSHMEM_SHMEM_SUPPORT=0 \
     NVSHMEM_UCX_SUPPORT=0 \
@@ -122,7 +121,7 @@ RUN apt-get update && apt-get install -y \
     bear \
     ccache \
     less \
-    && apt install -y rdma-core infiniband-diags openssh-server perftest ibverbs-providers libibumad3 libibverbs1 libnl-3-200 libnl-route-3-200 librdmacm1 \
+    && apt install -y infiniband-diags openssh-server perftest ibverbs-providers \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
