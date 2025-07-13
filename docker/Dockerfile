@@ -51,7 +51,7 @@ RUN mkdir -p /tmp/gdrcopy && cd /tmp \
 # Clone and install SGLang
 WORKDIR /sgl-workspace
 COPY . /sgl-workspace/sglang
-RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5lib six \
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools  html5lib six \
  && cd sglang \
  && case "$CUDA_VERSION" in \
       12.6.1) CUINDEX=126 ;; \
