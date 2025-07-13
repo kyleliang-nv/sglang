@@ -2,6 +2,8 @@ ARG CUDA_VERSION=12.6.1
 #FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04/
 FROM nvcr.io/nvidia/cuda-dl-base:25.03-cuda12.8-devel-ubuntu24.04
 
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
 ARG BUILD_TYPE=all
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
