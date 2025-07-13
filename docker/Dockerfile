@@ -68,16 +68,14 @@ RUN pip install --pre torch torchvision torchaudio --index-url https://download.
 
 
 # Build and install NVSHMEM + DeepEP
-RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/source/nvshmem_src_3.2.5-1.txz \
+RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
  && git clone https://github.com/fzyzcjy/DeepEP.git \
  && cd DeepEP \
  && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
  && cd .. \
- && tar -xf nvshmem_src_3.2.5-1.txz && mv nvshmem_src nvshmem \
+ && tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz && mv nvshmem_src nvshmem \
  && cd nvshmem \
- && git apply /sgl-workspace/DeepEP/third-party/nvshmem.patch \
- && sed -i '1i#include <unistd.h>' examples/moe_shuffle.cu \
- && rm -f /sgl-workspace/nvshmem_src_3.2.5-1.txz \
+ && rm -f /sgl-workspace/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
  && NVSHMEM_SHMEM_SUPPORT=0 \
     NVSHMEM_UCX_SUPPORT=0 \
     NVSHMEM_USE_NCCL=0 \
