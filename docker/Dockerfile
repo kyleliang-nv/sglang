@@ -6,7 +6,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
     NVSHMEM_DIR=/sgl-workspace/nvshmem/install \
-    BUILD_TYPE=${BUILD_TYPE}
+    BUILD_TYPE=${BUILD_TYPE} \
+    TORCH_CUDA_ARCH_LIST=10.0
 
 # Set timezone and install all packages
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -71,13 +72,17 @@ RUN pip install --pre torch torchvision torchaudio --index-url https://download.
 
 
 # Build NVSHMEM
+# Build and install NVSHMEM + DeepEP
 RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/source/nvshmem_src_3.2.5-1.txz \
+ && git clone https://github.com/fzyzcjy/DeepEP.git \
+ && cd DeepEP \
+ && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
+ && cd .. \
  && tar -xf nvshmem_src_3.2.5-1.txz && mv nvshmem_src nvshmem \
  && cd nvshmem \
  && git apply /sgl-workspace/DeepEP/third-party/nvshmem.patch \
  && sed -i '1i#include <unistd.h>' examples/moe_shuffle.cu \
  && rm -f /sgl-workspace/nvshmem_src_3.2.5-1.txz \
- && if [ "$BUILD_TYPE" = "blackwell" ]; then CUDA_ARCH=100; else CUDA_ARCH=90; fi \
  && NVSHMEM_SHMEM_SUPPORT=0 \
     NVSHMEM_UCX_SUPPORT=0 \
     NVSHMEM_USE_NCCL=0 \
@@ -86,8 +91,14 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
     NVSHMEM_PMIX_SUPPORT=0 \
     NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
     NVSHMEM_USE_GDRCOPY=1 \
-    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
- && cmake --build build --target install -j
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=100 \
+ && cmake --build build --target install -j \
+ && cd /sgl-workspace/DeepEP \
+ && NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST=10.0 pip install .
+
+ # This seems to be needed to build NVSHMEM
+#RUN apt install -y python3-venv
+
 
 #RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
 # && tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz && mv nvshmem_src nvshmem \
@@ -104,14 +115,11 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
 #    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=100 \
 # && cmake --build build --target install -j
 
-# This seems to be needed to build NVSHMEM
-RUN apt install -y python3-venv
-
 # Build and install DeepEP, which is dependent on NVSHMEM
-RUN git clone https://github.com/fzyzcjy/DeepEP.git \
- && cd DeepEP \
- && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
- && NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST=10.0 pip install .
+#RUN git clone https://github.com/fzyzcjy/DeepEP.git \
+# && cd DeepEP \
+# && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
+# && NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST=10.0 pip install .
 
  RUN git clone https://github.com/kvcache-ai/Mooncake.git && \
  cd Mooncake && \
