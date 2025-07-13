@@ -128,7 +128,7 @@ RUN git clone https://github.com/kvcache-ai/Mooncake.git \
  && cd build \
  && cmake .. -DUSE_MNNVL=ON \
  && make -j \
- && sudo make install
+ && make install
 
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
