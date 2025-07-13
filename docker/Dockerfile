@@ -67,15 +67,11 @@ RUN pip install --pre torch torchvision torchaudio --index-url https://download.
 
 
 
-# Build and install NVSHMEM + DeepEP
+# Build NVSHMEM
 RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
- && git clone https://github.com/fzyzcjy/DeepEP.git \
- && cd DeepEP \
- && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
- && cd .. \
  && tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz && mv nvshmem_src nvshmem \
- && cd nvshmem \
  && rm -f /sgl-workspace/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+ && cd nvshmem \
  && NVSHMEM_SHMEM_SUPPORT=0 \
     NVSHMEM_UCX_SUPPORT=0 \
     NVSHMEM_USE_NCCL=0 \
@@ -85,8 +81,12 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
     NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
     NVSHMEM_USE_GDRCOPY=1 \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=100 \
- && cmake --build build --target install -j \
- && cd /sgl-workspace/DeepEP \
+ && cmake --build build --target install -j
+
+# Build and install DeepEP, which is dependent on NVSHMEM
+RUN git clone https://github.com/fzyzcjy/DeepEP.git \
+ && cd DeepEP \
+ && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
  && NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST=10.0 pip install .
 
 # Python tools
