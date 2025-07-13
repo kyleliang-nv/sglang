@@ -44,7 +44,7 @@ RUN mkdir -p /tmp/gdrcopy && cd /tmp \
  && cd / && rm -rf /tmp/gdrcopy
 
 # Fix DeepEP IBGDA symlink
-RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
+#RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
 # Clone and install SGLang
 WORKDIR /sgl-workspace
@@ -77,7 +77,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
     NVSHMEM_UCX_SUPPORT=0 \
     NVSHMEM_USE_NCCL=0 \
     NVSHMEM_MPI_SUPPORT=0 \
-    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_IBGDA_SUPPORT=0 \
     NVSHMEM_PMIX_SUPPORT=0 \
     NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
     NVSHMEM_USE_GDRCOPY=1 \
