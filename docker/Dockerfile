@@ -121,14 +121,14 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
 # && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
 # && NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST=10.0 pip install .
 
- RUN git clone https://github.com/kvcache-ai/Mooncake.git && \
- cd Mooncake && \
- bash dependencies.sh && \
- mkdir build && \
- cd build && \
- cmake .. -DUSE_MNNVL=ON \
- make -j && \
- sudo make install
+RUN git clone https://github.com/kvcache-ai/Mooncake.git \
+ && cd Mooncake \
+ && bash dependencies.sh \
+ && mkdir build \
+ && cd build \
+ && cmake .. -DUSE_MNNVL=ON \
+ && make -j \
+ && sudo make install
 
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
