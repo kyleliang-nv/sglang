@@ -126,7 +126,7 @@ RUN git clone https://github.com/kvcache-ai/Mooncake.git \
  && bash dependencies.sh \
  && mkdir build \
  && cd build \
- && cmake .. -DUSE_MNNVL=ON \
+ && cmake .. -DUSE_CUDA=ON -DUSE_MNNVL=ON \
  && make -j \
  && make install
 
