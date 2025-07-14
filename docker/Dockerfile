@@ -185,7 +185,7 @@ RUN git clone https://github.com/kvcache-ai/Mooncake.git \
     && make install
 
 # Remove the symlink after build to avoid runtime issues
-#RUN rm /usr/local/cuda/lib64/stubs/libcuda.so.1
+RUN rm /usr/local/cuda/lib64/stubs/libcuda.so.1
 
 # Set up locale
 RUN locale-gen en_US.UTF-8
