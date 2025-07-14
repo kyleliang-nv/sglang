@@ -36,6 +36,14 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
  && rm -rf /var/lib/apt/lists/* \
  && apt-get clean
 
+
+# --- Install SGLang missing package
+RUN pip install netifaces
+
+# --- Install nightly PyTorch ---
+RUN pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
+
+
 # GDRCopy installation
 RUN mkdir -p /tmp/gdrcopy && cd /tmp \
  && git clone https://github.com/NVIDIA/gdrcopy.git -b v2.4.4 \
@@ -62,13 +70,6 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5li
       python3 -m pip install --no-cache-dir nvidia-nccl-cu12==2.27.5 --force-reinstall --no-deps ; \
       python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v0.2.4/sgl_kernel-0.2.4+cu128-cp39-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
     fi
-
-# --- Install SGLang missing package
-RUN pip install netifaces
-
-# --- Install nightly PyTorch ---
-RUN pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
-
 
 
 # Build NVSHMEM
