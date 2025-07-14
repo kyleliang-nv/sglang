@@ -121,14 +121,6 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
 # && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
 # && NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST=10.0 pip install .
 
-RUN git clone https://github.com/kvcache-ai/Mooncake.git \
- && cd Mooncake \
- && bash dependencies.sh \
- && mkdir build \
- && cd build \
- && cmake .. -DUSE_CUDA=ON -DUSE_MNNVL=ON \
- && make -j \
- && make install
 
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
@@ -175,6 +167,15 @@ RUN apt update -y \
     && apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "x86_64"; fi)/7fa2af80.pub \
     && apt update -y \
     && apt install nsight-systems-cli -y
+
+RUN git clone https://github.com/kvcache-ai/Mooncake.git \
+    && cd Mooncake \
+    && bash dependencies.sh \
+    && mkdir build \
+    && cd build \
+    && cmake .. -DUSE_CUDA=ON -DUSE_MNNVL=ON \
+    && make -j \
+    && make install
 
 # Set up locale
 RUN locale-gen en_US.UTF-8
