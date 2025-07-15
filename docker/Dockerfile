@@ -126,6 +126,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
     datamodel_code_generator \
+    mooncake_transfer_engine==0.3.4.post2 \
     pre-commit \
     pytest \
     black \
@@ -169,23 +170,15 @@ RUN apt update -y \
     && apt update -y \
     && apt install nsight-systems-cli -y
 
-# Create a symlink for libcuda.so.1 to the stub, this is needed to properly build Mooncake
-RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
-
-# Set LD_LIBRARY_PATH to include the stubs directory for the build
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH}
 
 RUN git clone https://github.com/kvcache-ai/Mooncake.git \
     && cd Mooncake \
     && bash dependencies.sh \
     && mkdir build \
     && cd build \
-    && cmake .. -DUSE_CUDA=ON -DUSE_MNNVL=ON \
+    && cmake .. -DUSE_MNNVL=ON \
     && make -j \
     && make install
-
-# Remove the symlink after build to avoid runtime issues
-RUN rm /usr/local/cuda/lib64/stubs/libcuda.so.1
 
 # Set up locale
 RUN locale-gen en_US.UTF-8
