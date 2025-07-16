@@ -170,16 +170,6 @@ RUN apt update -y \
     && apt update -y \
     && apt install nsight-systems-cli -y
 
-
-RUN git clone https://github.com/kvcache-ai/Mooncake.git \
-    && cd Mooncake \
-    && bash dependencies.sh -y \
-    && mkdir build \
-    && cd build \
-    && cmake .. -DUSE_MNNVL=ON \
-    && make -j \
-    && make install
-
 # Set up locale
 RUN locale-gen en_US.UTF-8
 ENV LANG en_US.UTF-8
