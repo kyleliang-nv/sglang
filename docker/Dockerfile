@@ -173,7 +173,7 @@ RUN apt update -y \
 
 RUN git clone https://github.com/kvcache-ai/Mooncake.git \
     && cd Mooncake \
-    && bash dependencies.sh \
+    && bash dependencies.sh -y \
     && mkdir build \
     && cd build \
     && cmake .. -DUSE_MNNVL=ON \
