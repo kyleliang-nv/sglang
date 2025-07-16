@@ -97,32 +97,6 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
  && cd /sgl-workspace/DeepEP \
  && NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST=10.0 pip install .
 
- # This seems to be needed to build NVSHMEM
-#RUN apt install -y python3-venv
-
-
-#RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
-# && tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz && mv nvshmem_src nvshmem \
-# && rm -f /sgl-workspace/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
-# && cd nvshmem \
-# && NVSHMEM_SHMEM_SUPPORT=0 \
-#    NVSHMEM_UCX_SUPPORT=0 \
-#    NVSHMEM_USE_NCCL=0 \
-#    NVSHMEM_MPI_SUPPORT=0 \
-#    NVSHMEM_IBGDA_SUPPORT=1 \
-#    NVSHMEM_PMIX_SUPPORT=0 \
-#    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-#    NVSHMEM_USE_GDRCOPY=1 \
-#    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=100 \
-# && cmake --build build --target install -j
-
-# Build and install DeepEP, which is dependent on NVSHMEM
-#RUN git clone https://github.com/fzyzcjy/DeepEP.git \
-# && cd DeepEP \
-# && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
-# && NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST=10.0 pip install .
-
-
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
     datamodel_code_generator \
@@ -168,6 +142,15 @@ RUN apt update -y \
     && apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "x86_64"; fi)/7fa2af80.pub \
     && apt update -y \
     && apt install nsight-systems-cli -y
+
+RUN git clone https://github.com/kvcache-ai/Mooncake.git \
+    && cd Mooncake \
+    && bash dependencies.sh -y \
+    && mkdir build \
+    && cd build \
+    && cmake .. -DUSE_MNNVL=ON \
+    && make -j \
+    && make install
 
 # Set up locale
 RUN locale-gen en_US.UTF-8
