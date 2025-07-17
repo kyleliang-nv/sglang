@@ -100,6 +100,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/sour
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
     datamodel_code_generator \
+    mooncake_transfer_engine==0.3.4.post2 \
     pre-commit \
     pytest \
     black \
@@ -143,14 +144,14 @@ RUN apt update -y \
     && apt update -y \
     && apt install nsight-systems-cli -y
 
-RUN git clone https://github.com/kvcache-ai/Mooncake.git \
-    && cd Mooncake \
-    && bash dependencies.sh -y \
-    && mkdir build \
-    && cd build \
-    && cmake .. -DUSE_MNNVL=ON \
-    && make -j \
-    && make install
+#RUN git clone https://github.com/kvcache-ai/Mooncake.git \
+#    && cd Mooncake \
+#    && bash dependencies.sh -y \
+#    && mkdir build \
+#    && cd build \
+#    && cmake .. -DUSE_MNNVL=ON \
+#    && make -j \
+#    && make install
 
 # Set up locale
 RUN locale-gen en_US.UTF-8
