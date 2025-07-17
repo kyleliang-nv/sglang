@@ -56,6 +56,7 @@ RUN mkdir -p /tmp/gdrcopy && cd /tmp \
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
 # Clone and install SGLang
+# FIXME: Forcing SGLang to 2a2d3478afe8cdb336888f2e6faa3775ac40254e because sgl-kernel v0.2.5 is missing aarch64 package
 WORKDIR /sgl-workspace
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5lib six \
  && git clone --depth=1 https://github.com/sgl-project/sglang.git \
