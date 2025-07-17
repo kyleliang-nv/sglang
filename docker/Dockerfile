@@ -1,7 +1,7 @@
-ARG CUDA_VERSION=12.6.1
+ARG CUDA_VERSION=12.8.1
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
-ARG BUILD_TYPE=all
+ARG BUILD_TYPE=blackwell
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
