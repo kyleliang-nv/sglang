@@ -348,8 +348,9 @@ setopt HIST_FIND_NO_DUPS
 setopt INC_APPEND_HISTORY
 EOF
 
-RUN set -euxo ; \
-    curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+### Disable this for now. Don't know why I need to do so for x86 build
+#RUN set -euxo ; \
+#    curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
 
 # Set workspace directory
 WORKDIR /sgl-workspace/sglang
