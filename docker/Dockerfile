@@ -70,14 +70,14 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
  && tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz && mv nvshmem_src nvshmem \
  && cd nvshmem \
  && rm -f /sgl-workspace/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
- && NVSHMEM_SHMEM_SUPPORT=0 \
-    NVSHMEM_UCX_SUPPORT=0 \
-    NVSHMEM_USE_NCCL=0 \
+ && NVSHMEM_SHMEM_SUPPORT=1 \
+    NVSHMEM_UCX_SUPPORT=1 \
+    NVSHMEM_USE_NCCL=1 \
     NVSHMEM_MPI_SUPPORT=0 \
-    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_IBGDA_SUPPORT=0 \
     NVSHMEM_PMIX_SUPPORT=0 \
     NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-    NVSHMEM_USE_GDRCOPY=1 \
+    NVSHMEM_USE_GDRCOPY=0 \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=90 \
  && cmake --build build --target install -j${CMAKE_BUILD_PARALLEL_LEVEL} \
  && cd /sgl-workspace/DeepEP \
