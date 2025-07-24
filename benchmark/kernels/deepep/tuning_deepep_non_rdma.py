@@ -447,12 +447,28 @@ def test_loop(local_rank: int, num_local_ranks: int, args):
     num_qps_per_rank_regular = num_sms // 2  # For regular mode
     num_qps_per_rank_low_latency = num_experts // num_ranks  # For low latency mode
 
+    # Calculate required buffer sizes based on metadata requirements
+    num_local_experts = num_experts // num_ranks
+    # NVL buffer must hold: num_ranks * (num_ranks + num_local_experts) * sizeof(int)
+    required_nvl_bytes = (
+        num_ranks * (num_ranks + num_local_experts) * 4
+    )  # sizeof(int) = 4
+    # Add some padding for safety
+    num_nvl_bytes = max(int(1e9), required_nvl_bytes * 2)
+    num_rdma_bytes = int(1e9)  # RDMA buffer size
+
+    if local_rank == 0:
+        print(f"[buffer] num_ranks={num_ranks}, num_local_experts={num_local_experts}")
+        print(
+            f"[buffer] required_nvl_bytes={required_nvl_bytes}, allocated_nvl_bytes={num_nvl_bytes}"
+        )
+
     # Try regular buffer initialization first, fall back to low latency mode if needed
     try:
         buffer = deep_ep.Buffer(
             group,
-            int(1e9),
-            int(1e9),
+            num_nvl_bytes,
+            num_rdma_bytes,
             low_latency_mode=False,
             num_qps_per_rank=num_qps_per_rank_regular,
         )
