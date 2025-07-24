@@ -448,9 +448,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args):
     required_nvl_bytes = (
         num_ranks * (num_ranks + num_local_experts) * 4
     )  # sizeof(int) = 4
-    # Add some padding for safety
-    num_nvl_bytes = max(int(1e9), required_nvl_bytes * 2)
-    num_rdma_bytes = int(1e9)  # RDMA buffer size
+    # Use very large buffer sizes to ensure we have enough space
+    num_nvl_bytes = int(4e9)  # 4GB NVL buffer
+    num_rdma_bytes = int(4e9)  # 4GB RDMA buffer
 
     if local_rank == 0:
         print(f"[buffer] num_ranks={num_ranks}, num_local_experts={num_local_experts}")
@@ -458,29 +458,42 @@ def test_loop(local_rank: int, num_local_ranks: int, args):
             f"[buffer] required_nvl_bytes={required_nvl_bytes}, allocated_nvl_bytes={num_nvl_bytes}"
         )
 
-    # Try regular buffer initialization first, fall back to low latency mode if needed
-    try:
+    # For smaller setups, use low latency mode directly to avoid buffer size issues
+    if num_ranks <= 8:
+        # Use low latency mode for small-scale setups
+        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+            4096, 7168, num_ranks, num_experts
+        )
         buffer = deep_ep.Buffer(
             group,
-            num_nvl_bytes,
-            num_rdma_bytes,
-            low_latency_mode=False,
-            num_qps_per_rank=num_qps_per_rank_regular,
+            num_rdma_bytes=num_rdma_bytes,
+            low_latency_mode=True,
+            num_qps_per_rank=num_qps_per_rank_low_latency,
         )
-    except RuntimeError as e:
-        if "num_ranks > NUM_MAX_NVL_PEERS" in str(e):
-            # Fall back to low latency mode
-            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                4096, 7168, num_ranks, num_experts
-            )
+    else:
+        # Try regular buffer initialization for larger setups
+        try:
             buffer = deep_ep.Buffer(
                 group,
-                num_rdma_bytes=num_rdma_bytes,
-                low_latency_mode=True,
-                num_qps_per_rank=num_qps_per_rank_low_latency,
+                num_nvl_bytes,
+                num_rdma_bytes,
+                low_latency_mode=False,
+                num_qps_per_rank=num_qps_per_rank_regular,
             )
-        else:
-            raise
+        except RuntimeError as e:
+            if "num_ranks > NUM_MAX_NVL_PEERS" in str(e):
+                # Fall back to low latency mode
+                num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+                    4096, 7168, num_ranks, num_experts
+                )
+                buffer = deep_ep.Buffer(
+                    group,
+                    num_rdma_bytes=num_rdma_bytes,
+                    low_latency_mode=True,
+                    num_qps_per_rank=num_qps_per_rank_low_latency,
+                )
+            else:
+                raise
     assert num_local_ranks <= 8 and num_ranks >= num_local_ranks
     torch.manual_seed(rank)
 
@@ -505,6 +518,14 @@ def test_loop(local_rank: int, num_local_ranks: int, args):
 
 
 if __name__ == "__main__":
+    # Set environment variables to handle NVSHMEM transport issues
+    import os
+
+    # Disable IBGDA transport if it's causing issues
+    os.environ["NVSHMEM_DISABLE_IBGDA"] = "1"
+    # Use shared memory transport for single-node setups
+    os.environ["NVSHMEM_SHMEM_DEVICE"] = "0"
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-sms", type=int, default=24)
     parser.add_argument("--output-path", type=str, default="deepep_tuned.json")
