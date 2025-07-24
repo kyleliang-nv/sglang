@@ -431,13 +431,19 @@ def test_loop(local_rank: int, num_local_ranks: int, args):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks, args)
 
     num_sms = args.num_sms
-    num_qps_per_rank = num_sms // 2
+    num_experts = (256 // num_ranks) * num_ranks
+    num_qps_per_rank = (
+        num_experts // num_ranks
+    )  # Use experts per rank for low latency mode
 
+    # Calculate appropriate buffer size for low latency mode
+    num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+        4096, 7168, num_ranks, num_experts
+    )
     buffer = deep_ep.Buffer(
         group,
-        int(1e9),
-        int(1e9),
-        low_latency_mode=False,
+        num_rdma_bytes=num_rdma_bytes,
+        low_latency_mode=True,  # Enable low latency mode for single-node or small-scale setups
         num_qps_per_rank=num_qps_per_rank,
     )
     assert num_local_ranks <= 8 and num_ranks >= num_local_ranks
