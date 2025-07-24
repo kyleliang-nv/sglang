@@ -14,7 +14,7 @@ def init_dist(local_rank: int, num_local_ranks: int, args):
     port = args.master_port
     num_nodes = args.nnodes
     node_rank = args.node_rank
-    assert (num_local_ranks < 8 and num_nodes == 1) or num_local_ranks == 8
+    assert 1 <= num_local_ranks <= 8
 
     dist.init_process_group(
         backend="nccl",

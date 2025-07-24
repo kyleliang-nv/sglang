@@ -40,7 +40,7 @@ def test_main(
         8,
         (256 // num_ranks) * num_ranks,
     )
-    assert num_experts % num_ranks == 0 and num_local_ranks == 8
+    assert num_experts % num_ranks == 0 and num_local_ranks <= 8
     if local_rank == 0:
         print(
             f"[config] num_tokens={num_tokens}, hidden={hidden}, num_topk_groups={num_topk_groups}, num_topk={num_topk}",
@@ -265,19 +265,23 @@ def test_loop(local_rank: int, num_local_ranks: int, args):
     num_sms = args.num_sms
     torch.manual_seed(rank)
 
-    for i in (num_sms,):
-        test_main(
-            i,
-            local_rank,
-            num_local_ranks,
-            num_ranks,
-            num_nodes,
-            rank,
-            group,
-            args,
-        )
-        if local_rank == 0:
-            print("", flush=True)
+    try:
+        for i in (num_sms,):
+            test_main(
+                i,
+                local_rank,
+                num_local_ranks,
+                num_ranks,
+                num_nodes,
+                rank,
+                group,
+                args,
+            )
+            if local_rank == 0:
+                print("", flush=True)
+    finally:
+        # Clean up distributed process group
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -293,7 +297,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Start system with {args=}")
 
-    num_processes = 8
+    # Dynamically determine number of processes based on available CUDA devices
+    num_cuda_devices = torch.cuda.device_count()
+    num_processes = min(
+        8, num_cuda_devices
+    )  # Use at most 8 processes, but not more than available devices
+
+    if num_cuda_devices < 8:
+        print(
+            f"Warning: Only {num_cuda_devices} CUDA devices available, using {num_processes} processes instead of 8"
+        )
     torch.multiprocessing.spawn(
         test_loop, args=(num_processes, args), nprocs=num_processes
     )
