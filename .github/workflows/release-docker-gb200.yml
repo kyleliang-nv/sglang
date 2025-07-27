@@ -9,7 +9,7 @@ on:
 
 jobs:
   publish:
-    if: github.repository == 'kyleliang-nv'
+    if: github.repository == 'kyleliang-nv/sglang'
     runs-on: ubuntu-22.04-arm
     environment: 'prod'
     steps:
