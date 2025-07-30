@@ -3,7 +3,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
 ARG BUILD_TYPE=blackwell
 ARG DEEPEP_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
-ARG CMAKE_BUILD_PARALLEL_LEVEL=2
+ARG CMAKE_BUILD_PARALLEL_LEVEL=1
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
@@ -54,8 +54,8 @@ RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linu
 
 # Clone and install SGLang
 WORKDIR /sgl-workspace
+COPY . /sgl-workspace/sglang
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5lib six \
- && git clone --depth 1 https://github.com/sgl-project/sglang.git \
  && cd sglang \
  && case "$CUDA_VERSION" in \
       12.6.1) CUINDEX=126 ;; \
@@ -162,6 +162,11 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
     pandas \
     matplotlib \
     tabulate
+
+# Install sglang router
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && . $HOME/.cargo/env \
+    && pip install sglang-router
 
 # Install diff-so-fancy
 RUN curl -LSso /usr/local/bin/diff-so-fancy https://github.com/so-fancy/diff-so-fancy/releases/download/v1.4.4/diff-so-fancy \
