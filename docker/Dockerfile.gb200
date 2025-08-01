@@ -157,7 +157,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
 
 # Install sglang router
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-    && source $HOME/.cargo/env \
+    && . $HOME/.cargo/env \
     && pip install sglang-router
 
 # Install diff-so-fancy
