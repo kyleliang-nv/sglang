@@ -9,7 +9,7 @@ on:
 
 jobs:
   publish-amd64:
-    if: github.repository == 'sgl-project/sglang'
+    if: github.repository == 'kyleliang-nv/sglang'
     environment: 'prod'
     strategy:
       matrix:
@@ -82,20 +82,20 @@ jobs:
             exit 1
           fi
 
-          docker buildx build --platform linux/amd64 --output type=image . -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.cuda_version }} --build-arg BUILD_TYPE=${{ matrix.build_type }} -t lmsysorg/sglang:${tag}${tag_suffix} --no-cache
+          docker buildx build --platform linux/amd64 --output type=image . -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.cuda_version }} --build-arg BUILD_TYPE=${{ matrix.build_type }} -t chingkai1023/sglang_image:${tag}${tag_suffix} --no-cache
 
           if [ "${{ matrix.cuda_version }}" = "12.6.1" ]; then
-            docker tag lmsysorg/sglang:${tag}${tag_suffix} lmsysorg/sglang:latest
+            docker tag chingkai1023/sglang_image:${tag}${tag_suffix} chingkai1023/sglang_image:latest
           fi
 
-          docker push lmsysorg/sglang:${tag}${tag_suffix}
+          docker push chingkai1023/sglang_image:${tag}${tag_suffix}
 
           if [ "${{ matrix.cuda_version }}" = "12.6.1" ]; then
-            docker push lmsysorg/sglang:latest
+            docker push chingkai1023/sglang_image:latest
           fi
 
   publish-arm64:
-    if: github.repository == 'sgl-project/sglang'
+    if: github.repository == 'kyleliang-nv/sglang'
     environment: 'prod'
     strategy:
       matrix:
@@ -125,6 +125,6 @@ jobs:
           tag=v${version}-${cuda_tag}
           tag_suffix="-gb200"
 
-          docker buildx build --platform linux/arm64 --output type=image . -f docker/Dockerfile --build-arg CUDA_VERSION=12.8.1 --build-arg BUILD_TYPE=blackwell -t lmsysorg/sglang:${tag}${tag_suffix} --no-cache
+          docker buildx build --platform linux/arm64 --output type=image . -f docker/Dockerfile --build-arg CUDA_VERSION=12.8.1 --build-arg BUILD_TYPE=blackwell -t chingkai1023/sglang_image:${tag}${tag_suffix} --no-cache
 
-          docker push lmsysorg/sglang:${tag}${tag_suffix}
+          docker push chingkai1023/sglang_image:${tag}${tag_suffix}
