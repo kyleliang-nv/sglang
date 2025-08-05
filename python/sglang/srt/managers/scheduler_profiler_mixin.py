@@ -305,8 +305,9 @@ class SchedulerProfilerMixin:
                         stops.append(it)
                 except ValueError as e:
                     raise ValueError(
-                        f"Cannot parse span in environment variable `{env_var}`: {e}"
+                        f"Cannot parse span in environment variable `{name}`: {e}"
                     ) from None
+            logger.info(f"Enable nsys iter profile for start: {starts}, stops: {stops}")
 
         return frozenset(starts), frozenset(stops)
 
