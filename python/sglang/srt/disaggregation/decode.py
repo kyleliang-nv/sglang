@@ -697,6 +697,7 @@ class SchedulerDisaggregationDecodeMixin:
                 self.self_check_during_idle()
 
             self.last_batch = batch
+            self.check_profile_stop()
 
     @torch.no_grad()
     def event_loop_overlap_disagg_decode(self: Scheduler):
@@ -772,6 +773,7 @@ class SchedulerDisaggregationDecodeMixin:
 
             self.last_batch = batch
             self.last_batch_in_queue = last_batch_in_queue
+            self.check_profile_stop()
 
     def _prepare_idle_batch_and_run(self: Scheduler, batch, delay_process=False):
         batch = self.prepare_mlp_sync_batch(batch)
