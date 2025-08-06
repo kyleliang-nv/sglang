@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-dev-x86:
-    if: ${{ github.repository == 'sgl-project/sglang' }}
+    if: ${{ github.repository == 'kyleliang-nv/sglang' }}
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -41,7 +41,7 @@ jobs:
 
       - name: Build and Push Dev Image (x86)
         run: |
-          docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t lmsysorg/sglang:${{ matrix.variant.tag }}-amd64 --no-cache .
+          docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-amd64 --no-cache .
 
   build-blackwell-x86:
     if: ${{ github.repository == 'sgl-project/sglang' }}
@@ -82,7 +82,7 @@ jobs:
 
       - name: Build and Push Blackwell Image (x86)
         run: |
-          docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t lmsysorg/sglang:${{ matrix.variant.tag }}-amd64 --no-cache .
+          docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-amd64 --no-cache .
 
   build-blackwell-arm:
     if: ${{ github.repository == 'sgl-project/sglang' }}
@@ -119,7 +119,7 @@ jobs:
 
       - name: Build and Push Blackwell Image (ARM)
         run: |
-          docker buildx build --platform linux/arm64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t lmsysorg/sglang:${{ matrix.variant.tag }}-arm64 --no-cache .
+          docker buildx build --platform linux/arm64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-arm64 --no-cache .
 
   create-manifest:
     runs-on: ubuntu-22.04
@@ -132,6 +132,6 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: |
           docker buildx imagetools create \
-            -t lmsysorg/sglang:blackwell \
-            lmsysorg/sglang:blackwell-amd64 \
-            lmsysorg/sglang:blackwell-arm64
+            -t chingkai1023/sglang:blackwell \
+            chingkai1023/sglang:blackwell-amd64 \
+            chingkai1023/sglang:blackwell-arm64
