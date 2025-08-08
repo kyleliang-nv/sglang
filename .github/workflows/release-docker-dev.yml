@@ -44,7 +44,7 @@ jobs:
           docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-amd64 --no-cache .
 
   build-blackwell-x86:
-    if: ${{ github.repository == 'sgl-project/sglang' }}
+    if: ${{ github.repository == 'kyleliang-nv/sglang' }}
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -85,7 +85,7 @@ jobs:
           docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-amd64 --no-cache .
 
   build-blackwell-arm:
-    if: ${{ github.repository == 'sgl-project/sglang' }}
+    if: ${{ github.repository == 'kyleliang-nv/sglang' }}
     runs-on: ubuntu-22.04-arm
     strategy:
       matrix:
