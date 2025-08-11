@@ -169,6 +169,20 @@ GRAMMAR_TIMEOUT = float(os.environ.get("SGLANG_GRAMMAR_TIMEOUT", 300))
 _is_cpu = is_cpu()
 
 
+def safe_log(level: str, message: str) -> None:
+    """Safely log a message, with fallback to stderr if logging fails."""
+    try:
+        logger.log(getattr(logging, level.upper(), logging.INFO), message)
+    except Exception:
+        try:
+            import sys
+
+            print(f"[{level.upper()}] {message}", file=sys.stderr)
+        except Exception:
+            # If even stderr fails, just pass silently
+            pass
+
+
 @dataclass
 class GenerationBatchResult:
     logits_output: Optional[LogitsProcessorOutput]
@@ -905,7 +919,11 @@ class Scheduler(
                         logits_output = None
                     output_result = GenerationBatchResult(
                         logits_output=logits_output,
-                        pp_hidden_states_proxy_tensors=None,
+                        pp_hidden_states_proxy_tensors=(
+                            pp_hidden_states_proxy_tensors
+                            if not self.pp_group.is_last_rank
+                            else None
+                        ),
                         next_token_ids=next_pp_outputs["next_token_ids"],
                         extend_input_len_per_req=next_pp_outputs.tensors.get(
                             "extend_input_len_per_req", None
@@ -1130,7 +1148,7 @@ class Scheduler(
                 if recv_req.bootstrap_room is None:
                     error_msg = (
                         f"Invalid request: Disaggregated request received without "
-                        f"boostrap room id. {req.rid=}"
+                        f"boostrap room id. req.rid={req.rid}"
                     )
                     logger.error(error_msg)
                     prepare_abort(req, error_msg)
@@ -2323,6 +2341,12 @@ class Scheduler(
         return RpcReqOutput(success, "" if not exec else str(exec))
 
     def abort_request(self, recv_req: AbortReq):
+        # Track where abort_request is called from
+        safe_log(
+            "debug",
+            f"abort_request called with recv_req.rid={recv_req.rid}, recv_req.abort_all={recv_req.abort_all}",
+        )
+
         # Delete requests in the waiting queue
         to_del = []
         for i, req in enumerate(self.waiting_queue):
@@ -2336,7 +2360,7 @@ class Scheduler(
             # We still need to send something back to TokenizerManager to clean up the state.
             req = self.waiting_queue.pop(i)
             self.send_to_tokenizer.send_pyobj(AbortReq(req.rid))
-            logger.debug(f"Abort queued request. {req.rid=}")
+            logger.debug(f"Abort queued request. req.rid={req.rid}")
 
         # Delete the requests in the grammar queue
         for req in self.grammar_queue:
@@ -2344,7 +2368,7 @@ class Scheduler(
             # The request will still run one prefill forward pass.
             # In this case, we change the input_ids to be only one token to make this prefill cheap.
             if recv_req.abort_all or req.rid.startswith(recv_req.rid):
-                logger.debug(f"Abort grammar queue request. {req.rid=}")
+                logger.debug(f"Abort grammar queue request. req.rid={req.rid}")
                 if req.grammar:
                     req.grammar.cancel()
                 req.set_finish_with_abort("Aborted by AbortReq.")
@@ -2355,14 +2379,19 @@ class Scheduler(
             for i, req in enumerate(self.disagg_prefill_bootstrap_queue.queue):
                 if recv_req.abort_all or req.rid.startswith(recv_req.rid):
                     if hasattr(req.disagg_kv_sender, "abort"):
-                        logger.debug(f"Abort bootstrap queue request. {req.rid=}")
+                        time_in_queue = getattr(req, "bootstrap_add_time", 0)
+                        if time_in_queue > 0:
+                            time_in_queue = time.time() - time_in_queue
+                        logger.debug(
+                            f"Abort bootstrap queue request. req.rid={req.rid} after {time_in_queue:.3f}s in queue"
+                        )
                         req.disagg_kv_sender.abort()
 
             # Abort in-flight requests
             for i, req in enumerate(self.disagg_prefill_inflight_queue):
                 if recv_req.abort_all or req.rid.startswith(recv_req.rid):
                     if hasattr(req.disagg_kv_sender, "abort"):
-                        logger.debug(f"Abort inflight queue request. {req.rid=}")
+                        logger.debug(f"Abort inflight queue request. req.rid={req.rid}")
                         req.disagg_kv_sender.abort()
 
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
@@ -2371,7 +2400,7 @@ class Scheduler(
                 if recv_req.abort_all or decode_req.req.rid.startswith(recv_req.rid):
                     if hasattr(decode_req.kv_receiver, "abort"):
                         logger.debug(
-                            f"Abort prealloc queue request. {decode_req.req.rid=}"
+                            f"Abort prealloc queue request. decode_req.req.rid={decode_req.req.rid}"
                         )
                         decode_req.kv_receiver.abort()
 
@@ -2380,7 +2409,7 @@ class Scheduler(
                 if recv_req.abort_all or decode_req.req.rid.startswith(recv_req.rid):
                     if hasattr(decode_req.kv_receiver, "abort"):
                         logger.debug(
-                            f"Abort transfer queue request. {decode_req.req.rid=}"
+                            f"Abort transfer queue request. decode_req.req.rid={decode_req.req.rid}"
                         )
                         decode_req.kv_receiver.abort()
 
@@ -2397,7 +2426,7 @@ class Scheduler(
                 # Abort method 3: set `to_abort=True`
                 # The request will still run one decode forward pass.
                 # Then we reuse all existing code to clean up the KV cache allocation.
-                logger.debug(f"Abort running request. {req.rid=}")
+                logger.debug(f"Abort running request. req.rid={req.rid}")
                 req.to_abort = True
 
     def _pause_engine(self) -> Tuple[List[Req], int]:

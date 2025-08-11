@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
@@ -53,6 +54,20 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import KVCache
 
 logger = logging.getLogger(__name__)
+
+
+def safe_log(level: str, message: str) -> None:
+    """Safely log a message, with fallback to stderr if logging fails."""
+    try:
+        logger.log(getattr(logging, level.upper(), logging.INFO), message)
+    except Exception:
+        try:
+            import sys
+
+            print(f"[{level.upper()}] {message}", file=sys.stderr)
+        except Exception:
+            # If even stderr fails, just pass silently
+            pass
 
 
 class PrefillBootstrapQueue:
@@ -162,6 +177,10 @@ class PrefillBootstrapQueue:
             pp_rank=self.pp_rank,
         )
         self._process_req(req)
+
+        # Add timestamp for tracking
+        req.bootstrap_add_time = time.time()
+
         self.queue.append(req)
 
     def extend(self, reqs: List[Req], num_kv_heads: int) -> None:
@@ -199,6 +218,12 @@ class PrefillBootstrapQueue:
         failed_reqs = []
         indices_to_remove = set()
 
+        # Log current queue state
+        if len(self.queue) > 0:
+            logger.debug(
+                f"Bootstrap queue has {len(self.queue)} requests: {[req.rid for req in self.queue]}"
+            )
+
         if len(self.queue) == 0:
             if return_failed_reqs is False:
                 return []
@@ -220,7 +245,7 @@ class PrefillBootstrapQueue:
             if poll == KVPoll.Bootstrapping:
                 continue
             elif poll == KVPoll.Failed:
-                error_message = f"Prefill bootstrap failed for request rank={self.tp_rank} {req.rid=} {req.bootstrap_room=}"
+                error_message = f"Prefill bootstrap failed for request rank={self.tp_rank} req.rid={req.rid} req.bootstrap_room={req.bootstrap_room}"
                 try:
                     req.disagg_kv_sender.failure_exception()
                 except Exception as e:
@@ -502,7 +527,7 @@ class SchedulerDisaggregationPrefillMixin:
                     req.disagg_kv_sender.clear()
                 done_reqs.append(req)
             elif poll == KVPoll.Failed:
-                error_message = f"Prefill transfer failed for request rank={self.tp_rank} {req.rid=} {req.bootstrap_room=}"
+                error_message = f"Prefill transfer failed for request rank={self.tp_rank} req.rid={req.rid} req.bootstrap_room={req.bootstrap_room}"
                 try:
                     req.disagg_kv_sender.failure_exception()
                 except Exception as e:
@@ -514,7 +539,7 @@ class SchedulerDisaggregationPrefillMixin:
                 )
                 done_reqs.append(req)
             else:
-                assert False, f"Unexpected polling state {poll=}"
+                assert False, f"Unexpected polling state poll={poll}"
 
         # Stream requests which have finished transfer
         self.stream_output(
@@ -599,7 +624,7 @@ class SchedulerDisaggregationPrefillMixin:
         page_indices = kv_to_page_indices(kv_indices, page_size)
         if len(page_indices) == 0:
             logger.info(
-                f"Skip sending kv chunk for request {req.rid=} {req.bootstrap_room=} because page_indices is empty"
+                f"Skip sending kv chunk for request req.rid={req.rid} req.bootstrap_room={req.bootstrap_room} because page_indices is empty"
             )
             return
         req.disagg_kv_sender.send(page_indices)

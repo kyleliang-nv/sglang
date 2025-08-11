@@ -211,6 +211,14 @@ class MooncakeKVManager(BaseKVManager):
                 "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT", 300
             )
 
+            # Log the actual timeout value being used
+            logger.info(
+                f"Prefill server bootstrap timeout set to: {self.bootstrap_timeout} seconds"
+            )
+            logger.info(
+                f"Environment variable SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT: {os.getenv('SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT')}"
+            )
+
             self.enable_custom_mem_pool = get_bool_env_var(
                 "SGLANG_MOONCAKE_CUSTOM_MEM_POOL", "false"
             )
@@ -240,6 +248,11 @@ class MooncakeKVManager(BaseKVManager):
             # These timeout requests should be aborted to release the tree cache.
             self.waiting_timeout = get_int_env_var(
                 "SGLANG_DISAGGREGATION_WAITING_TIMEOUT", 300
+            )
+
+            # Log the actual timeout value being used
+            logger.info(
+                f"Decode server waiting timeout set to: {self.waiting_timeout} seconds"
             )
         else:
             raise ValueError(

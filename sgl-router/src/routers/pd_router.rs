@@ -1070,7 +1070,8 @@ impl PDRouter {
                     }
                     Err(e) => {
                         if let Some(ref url) = decode_url {
-                            error!("Stream error from decode server {}: {}", url, e);
+                            error!("Stream error from decode server {}: {} (error_type: {:?}, timestamp: {:?})",
+                                   url, e, std::any::type_name_of_val(&e), std::time::SystemTime::now());
                             RouterMetrics::record_pd_stream_error(url);
                         }
                         let _ = tx.send(Err(format!("Stream error: {}", e)));
