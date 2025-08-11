@@ -76,7 +76,12 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5li
       python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v0.3.3/sgl_kernel-0.3.3+cu128-cp39-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
     fi \
  && if [ "$CUDA_VERSION" = "12.9.1" ]; then \
-      python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v0.3.3/sgl_kernel-0.3.3-cp39-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
+      if [ "$(uname -m)" = "aarch64" ]; then \
+       # FIXME: This is a temporary work-around for the sgl_kernel wheel for aarch64, where the x86 wheel is python 3.9, but the aarch64 wheel is python 3.10.
+        python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v0.3.3/sgl_kernel-0.3.3+cu129-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
+      else \
+        python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v0.3.3/sgl_kernel-0.3.3-cp39-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
+      fi ; \
     fi
 
 # Download source files
