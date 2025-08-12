@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-dev-x86:
-    if: ${{ github.repository == 'sgl-project/sglang' }}
+    if: ${{ github.repository == 'kyleliang-nv/sglang' }}
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -41,10 +41,10 @@ jobs:
 
       - name: Build and Push Dev Image (x86)
         run: |
-          docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t lmsysorg/sglang:${{ matrix.variant.tag }} --no-cache .
+          docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }} --no-cache .
 
   build-blackwell-x86:
-    if: ${{ github.repository == 'sgl-project/sglang' }}
+    if: ${{ github.repository == 'kyleliang-nv/sglang' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -83,13 +83,13 @@ jobs:
       - name: Build and Push Blackwell Image (x86)
         run: |
           if [ "${{ matrix.variant.version }}" = "12.9.1" ]; then
-            docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t lmsysorg/sglang:${{ matrix.variant.tag }}-x86 --no-cache .
+            docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-x86 --no-cache .
           else
-            docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t lmsysorg/sglang:${{ matrix.variant.tag }} --no-cache .
+            docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }} --no-cache .
           fi
 
   build-blackwell-arm:
-    if: ${{ github.repository == 'sgl-project/sglang' }}
+    if: ${{ github.repository == 'kyleliang-nv/sglang' }}
     runs-on: ubuntu-22.04-arm
     strategy:
       matrix:
@@ -123,13 +123,13 @@ jobs:
 
       - name: Build and Push Blackwell Image (ARM)
         run: |
-          docker buildx build --platform linux/arm64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t lmsysorg/sglang:${{ matrix.variant.tag }}-arm64 --no-cache .
+          docker buildx build --platform linux/arm64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-arm64 --no-cache .
 
 
   create-manifests:
     runs-on: ubuntu-22.04
     needs: [build-blackwell-x86, build-blackwell-arm]
-    if: ${{ github.repository == 'sgl-project/sglang' }}
+    if: ${{ github.repository == 'kyleliang-nv/sglang' }}
     strategy:
       matrix:
         variant:
@@ -144,6 +144,6 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: |
           docker buildx imagetools create \
-            -t lmsysorg/sglang:${{ matrix.variant.tag }} \
-            lmsysorg/sglang:${{ matrix.variant.x86_tag }} \
-            lmsysorg/sglang:${{ matrix.variant.arm64_tag }}
+            -t chingkai1023/sglang:${{ matrix.variant.tag }} \
+            chingkai1023/sglang:${{ matrix.variant.x86_tag }} \
+            chingkai1023/sglang:${{ matrix.variant.arm64_tag }}
