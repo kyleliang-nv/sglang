@@ -83,9 +83,9 @@ jobs:
       - name: Build and Push Blackwell Image (x86)
         run: |
           if [ "${{ matrix.variant.version }}" = "12.9.1" ]; then
-            docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-amd64 --no-cache .
+            docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} -t chingkai1023/sglang:${{ matrix.variant.tag }}-amd64 --no-cache .
           else
-            docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }} --no-cache .
+            docker buildx build --platform linux/amd64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} -t chingkai1023/sglang:${{ matrix.variant.tag }} --no-cache .
           fi
 
   build-blackwell-arm:
@@ -123,7 +123,7 @@ jobs:
 
       - name: Build and Push Blackwell Image (ARM)
         run: |
-          docker buildx build --platform linux/arm64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} --build-arg CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) -t chingkai1023/sglang:${{ matrix.variant.tag }}-arm64 --no-cache .
+          docker buildx build --platform linux/arm64 --push -f docker/Dockerfile --build-arg CUDA_VERSION=${{ matrix.variant.version }} --build-arg BUILD_TYPE=${{ matrix.variant.type }} -t chingkai1023/sglang:${{ matrix.variant.tag }}-arm64 --no-cache .
 
 
   create-manifests:
