@@ -13,6 +13,7 @@ python3 -m sglang.bench_serving --backend sglang --dataset-name random --num-pro
 import argparse
 import asyncio
 import json
+import logging
 import os
 import pickle
 import random
@@ -38,6 +39,57 @@ from transformers import (
     PreTrainedTokenizerBase,
     PreTrainedTokenizerFast,
 )
+
+# Configure logging with timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# Global counter for tracking concurrent requests
+concurrent_requests = 0
+concurrent_requests_lock = asyncio.Lock()
+
+# Global counter for tracking remaining unsent requests
+remaining_unsent_requests = 0
+remaining_unsent_requests_lock = asyncio.Lock()
+
+
+async def increment_concurrent_requests():
+    """Increment the concurrent request counter and return the new count."""
+    global concurrent_requests
+    async with concurrent_requests_lock:
+        concurrent_requests += 1
+        return concurrent_requests
+
+
+async def decrement_concurrent_requests():
+    """Decrement the concurrent request counter and return the new count."""
+    global concurrent_requests
+    async with concurrent_requests_lock:
+        concurrent_requests = max(0, concurrent_requests - 1)
+        return concurrent_requests
+
+
+def get_concurrent_requests():
+    """Get the current concurrent request count (thread-safe)."""
+    global concurrent_requests
+    return concurrent_requests
+
+
+def get_remaining_unsent_requests():
+    """Get the current remaining unsent requests count (thread-safe)."""
+    global remaining_unsent_requests
+    return remaining_unsent_requests
+
+
+def set_remaining_unsent_requests(count: int):
+    """Set the remaining unsent requests count (thread-safe)."""
+    global remaining_unsent_requests
+    remaining_unsent_requests = count
+
 
 ASSISTANT_SUFFIX = "Assistant:"
 
@@ -118,65 +170,97 @@ async def async_request_trt_llm(
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
 
-    async with _create_bench_client_session() as session:
-        payload = {
-            "accumulate_tokens": True,
-            "text_input": request_func_input.prompt,
-            "temperature": 0.000001,
-            "top_p": 1.0,
-            "max_tokens": request_func_input.output_len,
-            "stream": True,
-            "min_length": request_func_input.output_len,
-            "end_id": 1048576,
-            **request_func_input.extra_request_body,
-        }
-        if args.disable_ignore_eos:
-            del payload["min_length"]
-            del payload["end_id"]
-        output = RequestFuncOutput.init_new(request_func_input)
+    # Increment concurrent request counter and log request start
+    concurrent_count = await increment_concurrent_requests()
+    request_start_time = time.time()
+    remaining_unsent = get_remaining_unsent_requests()
+    logger.info(
+        f"🚀 Sending TRT LLM request to {api_url} - Request ID: {id(request_func_input)} - Prompt length: {request_func_input.prompt_len} tokens - Expected output: {request_func_input.output_len} tokens - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+    )
 
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        try:
-            async with session.post(url=api_url, json=payload) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
+    try:
+        async with _create_bench_client_session() as session:
+            payload = {
+                "accumulate_tokens": True,
+                "text_input": request_func_input.prompt,
+                "temperature": 0.000001,
+                "top_p": 1.0,
+                "max_tokens": request_func_input.output_len,
+                "stream": True,
+                "min_length": request_func_input.output_len,
+                "end_id": 1048576,
+                **request_func_input.extra_request_body,
+            }
+            if args.disable_ignore_eos:
+                del payload["min_length"]
+                del payload["end_id"]
+            output = RequestFuncOutput.init_new(request_func_input)
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data:")
+            ttft = 0.0
+            st = time.perf_counter()
+            most_recent_timestamp = st
+            try:
+                async with session.post(url=api_url, json=payload) as response:
+                    if response.status == 200:
+                        async for chunk_bytes in response.content:
+                            chunk_bytes = chunk_bytes.strip()
+                            if not chunk_bytes:
+                                continue
 
-                        data = json.loads(chunk)
-                        output.generated_text += data["text_output"]
-                        timestamp = time.perf_counter()
-                        # First token
-                        if ttft == 0.0:
-                            ttft = timestamp - st
-                            output.ttft = ttft
+                            chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data:")
 
-                        # Decoding phase
-                        else:
-                            output.itl.append(timestamp - most_recent_timestamp)
+                            data = json.loads(chunk)
+                            output.generated_text += data["text_output"]
+                            timestamp = time.perf_counter()
+                            # First token
+                            if ttft == 0.0:
+                                ttft = timestamp - st
+                                output.ttft = ttft
+                                logger.info(
+                                    f"⚡ First token received for request {id(request_func_input)} - TTFT: {ttft:.3f}s"
+                                )
 
-                        most_recent_timestamp = timestamp
+                            # Decoding phase
+                            else:
+                                output.itl.append(timestamp - most_recent_timestamp)
 
-                    output.latency = most_recent_timestamp - st
-                    output.success = True
-                    output.output_len = request_func_input.output_len
+                            most_recent_timestamp = timestamp
 
-                else:
-                    output.error = response.reason or ""
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
+                        output.latency = most_recent_timestamp - st
+                        output.success = True
+                        output.output_len = request_func_input.output_len
 
-        if pbar:
-            pbar.update(1)
-        return output
+                        # Log successful completion
+                        total_time = time.time() - request_start_time
+                        remaining_unsent = get_remaining_unsent_requests()
+                        logger.info(
+                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {output.latency:.3f}s - Generated: {output.output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                        )
+
+                    else:
+                        output.error = response.reason or ""
+                        output.success = False
+                        logger.error(
+                            f"❌ Request {id(request_func_input)} failed with status {response.status}: {output.error}"
+                        )
+            except Exception:
+                output.success = False
+                exc_info = sys.exc_info()
+                output.error = "".join(traceback.format_exception(*exc_info))
+                logger.error(
+                    f"💥 Request {id(request_func_input)} failed with exception: {output.error}"
+                )
+    finally:
+        # Always decrement concurrent request counter
+        concurrent_count = await decrement_concurrent_requests()
+        remaining_unsent = get_remaining_unsent_requests()
+        logger.info(
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+        )
+
+    if pbar:
+        pbar.update(1)
+    return output
 
 
 # set ignore_eos True by default
@@ -191,74 +275,109 @@ async def async_request_openai_completions(
 
     prompt = request_func_input.prompt
 
-    async with _create_bench_client_session() as session:
-        payload = {
-            "model": request_func_input.model,
-            "prompt": prompt,
-            "temperature": 0.0,
-            "best_of": 1,
-            "max_tokens": request_func_input.output_len,
-            "stream": not args.disable_stream,
-            "ignore_eos": not args.disable_ignore_eos,
-            **request_func_input.extra_request_body,
-        }
-        headers = get_auth_headers()
+    # Increment concurrent request counter and log request start
+    concurrent_count = await increment_concurrent_requests()
+    request_start_time = time.time()
+    remaining_unsent = get_remaining_unsent_requests()
+    logger.info(
+        f"🚀 Sending OpenAI Completions request to {api_url} - Request ID: {id(request_func_input)} - Prompt length: {request_func_input.prompt_len} tokens - Expected output: {request_func_input.output_len} tokens - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+    )
 
-        output = RequestFuncOutput.init_new(request_func_input)
+    try:
+        async with _create_bench_client_session() as session:
+            payload = {
+                "model": request_func_input.model,
+                "prompt": prompt,
+                "temperature": 0.0,
+                "best_of": 1,
+                "max_tokens": request_func_input.output_len,
+                "stream": not args.disable_stream,
+                "ignore_eos": not args.disable_ignore_eos,
+                **request_func_input.extra_request_body,
+            }
+            headers = get_auth_headers()
 
-        generated_text = ""
-        output_len = request_func_input.output_len
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        try:
-            async with session.post(
-                url=api_url, json=payload, headers=headers
-            ) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
+            output = RequestFuncOutput.init_new(request_func_input)
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
-                        latency = time.perf_counter() - st
-                        if chunk == "[DONE]":
-                            pass
-                        else:
-                            data = json.loads(chunk)
+            generated_text = ""
+            output_len = request_func_input.output_len
+            ttft = 0.0
+            st = time.perf_counter()
+            most_recent_timestamp = st
+            try:
+                async with session.post(
+                    url=api_url, json=payload, headers=headers
+                ) as response:
+                    if response.status == 200:
+                        async for chunk_bytes in response.content:
+                            chunk_bytes = chunk_bytes.strip()
+                            if not chunk_bytes:
+                                continue
 
-                            # NOTE: Some completion API might have a last
-                            # usage summary response without a token so we
-                            # want to check a token was generated
-                            if data["choices"][0]["text"]:
-                                timestamp = time.perf_counter()
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                            chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
+                            latency = time.perf_counter() - st
+                            if chunk == "[DONE]":
+                                pass
+                            else:
+                                data = json.loads(chunk)
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                                # NOTE: Some completion API might have a last
+                                # usage summary response without a token so we
+                                # want to check a token was generated
+                                if data["choices"][0]["text"]:
+                                    timestamp = time.perf_counter()
+                                    # First token
+                                    if ttft == 0.0:
+                                        ttft = time.perf_counter() - st
+                                        output.ttft = ttft
+                                        logger.info(
+                                            f"⚡ First token received for request {id(request_func_input)} - TTFT: {ttft:.3f}s"
+                                        )
 
-                                most_recent_timestamp = timestamp
-                                generated_text += data["choices"][0]["text"]
-                                output_len = (data.get("usage") or {}).get(
-                                    "completion_tokens", output_len
-                                )
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(
+                                            timestamp - most_recent_timestamp
+                                        )
 
-                    output.generated_text = generated_text
-                    output.success = True
-                    output.latency = latency
-                    output.output_len = output_len
-                else:
-                    output.error = response.reason or ""
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
+                                    most_recent_timestamp = timestamp
+                                    generated_text += data["choices"][0]["text"]
+                                    output_len = (data.get("usage") or {}).get(
+                                        "completion_tokens", output_len
+                                    )
+
+                        output.generated_text = generated_text
+                        output.success = True
+                        output.latency = latency
+                        output.output_len = output_len
+
+                        # Log successful completion
+                        total_time = time.time() - request_start_time
+                        remaining_unsent = get_remaining_unsent_requests()
+                        logger.info(
+                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                        )
+
+                    else:
+                        output.error = response.reason or ""
+                        output.success = False
+                        logger.error(
+                            f"❌ Request {id(request_func_input)} failed with status {response.status}: {output.error}"
+                        )
+            except Exception:
+                output.success = False
+                exc_info = sys.exc_info()
+                output.error = "".join(traceback.format_exception(*exc_info))
+                logger.error(
+                    f"💥 Request {id(request_func_input)} failed with exception: {output.error}"
+                )
+    finally:
+        # Always decrement concurrent request counter
+        concurrent_count = await decrement_concurrent_requests()
+        remaining_unsent = get_remaining_unsent_requests()
+        logger.info(
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+        )
 
     if pbar:
         pbar.update(1)
@@ -288,6 +407,15 @@ async def async_request_openai_chat_completions(
         "chat/completions"
     ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
 
+    # Increment concurrent request counter and log request start
+    concurrent_count = await increment_concurrent_requests()
+    request_start_time = time.time()
+    has_image = bool(request_func_input.image_data)
+    remaining_unsent = get_remaining_unsent_requests()
+    logger.info(
+        f"🚀 Sending OpenAI Chat request to {api_url} - Request ID: {id(request_func_input)} - Prompt length: {request_func_input.prompt_len} tokens - Expected output: {request_func_input.output_len} tokens - Has image: {has_image} - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+    )
+
     if request_func_input.image_data:
         messages = [
             {
@@ -304,93 +432,129 @@ async def async_request_openai_chat_completions(
     else:
         messages = [{"role": "user", "content": request_func_input.prompt}]
 
-    async with _create_bench_client_session() as session:
-        payload = {
-            "model": request_func_input.model,
-            "messages": messages,
-            "temperature": 0.0,
-            "max_tokens": request_func_input.output_len,
-            "stream": not args.disable_stream,
-            **request_func_input.extra_request_body,
-        }
-        headers = get_auth_headers()
+    try:
+        async with _create_bench_client_session() as session:
+            payload = {
+                "model": request_func_input.model,
+                "messages": messages,
+                "temperature": 0.0,
+                "max_tokens": request_func_input.output_len,
+                "stream": not args.disable_stream,
+                **request_func_input.extra_request_body,
+            }
+            headers = get_auth_headers()
 
-        output = RequestFuncOutput.init_new(request_func_input)
+            output = RequestFuncOutput.init_new(request_func_input)
 
-        generated_text = ""
-        output_len = request_func_input.output_len
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        try:
-            async with session.post(
-                url=api_url, json=payload, headers=headers
-            ) as response:
-                if response.status == 200:
-                    if args.disable_stream:
-                        # Non-streaming response
-                        response_json = await response.json()
-                        output.generated_text = response_json["choices"][0]["message"][
-                            "content"
-                        ]
-                        output.success = True
-                        output.latency = time.perf_counter() - st
-                        output.ttft = (
-                            output.latency
-                        )  # For non-streaming, TTFT = total latency
-                        output.output_len = response_json.get("usage", {}).get(
-                            "completion_tokens", output_len
-                        )
-                    else:
-                        # Streaming response
-                        async for chunk_bytes in response.content:
-                            chunk_bytes = chunk_bytes.strip()
-                            if not chunk_bytes:
-                                continue
+            generated_text = ""
+            output_len = request_func_input.output_len
+            ttft = 0.0
+            st = time.perf_counter()
+            most_recent_timestamp = st
+            try:
+                async with session.post(
+                    url=api_url, json=payload, headers=headers
+                ) as response:
+                    if response.status == 200:
+                        if args.disable_stream:
+                            # Non-streaming response
+                            response_json = await response.json()
+                            output.generated_text = response_json["choices"][0][
+                                "message"
+                            ]["content"]
+                            output.success = True
+                            output.latency = time.perf_counter() - st
+                            output.ttft = (
+                                output.latency
+                            )  # For non-streaming, TTFT = total latency
+                            output.output_len = response_json.get("usage", {}).get(
+                                "completion_tokens", output_len
+                            )
 
-                            chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
-                            latency = time.perf_counter() - st
-                            if chunk == "[DONE]":
-                                pass
-                            else:
-                                data = json.loads(chunk)
+                            # Log successful completion for non-streaming
+                            total_time = time.time() - request_start_time
+                            remaining_unsent = get_remaining_unsent_requests()
+                            logger.info(
+                                f"✅ Request {id(request_func_input)} completed successfully (non-streaming) - Total time: {total_time:.3f}s - Latency: {output.latency:.3f}s - Generated: {output.output_len} tokens - Remaining unsent: {remaining_unsent}"
+                            )
 
-                                # Check if this chunk contains content
-                                delta = data.get("choices", [{}])[0].get("delta", {})
-                                content = delta.get("content", "")
+                        else:
+                            # Streaming response
+                            async for chunk_bytes in response.content:
+                                chunk_bytes = chunk_bytes.strip()
+                                if not chunk_bytes:
+                                    continue
 
-                                if content:
-                                    timestamp = time.perf_counter()
-                                    # First token
-                                    if ttft == 0.0:
-                                        ttft = timestamp - st
-                                        output.ttft = ttft
-
-                                    # Decoding phase
-                                    else:
-                                        output.itl.append(
-                                            timestamp - most_recent_timestamp
-                                        )
-
-                                    most_recent_timestamp = timestamp
-                                    generated_text += content
-
-                                # Check for usage info in final chunk
-                                output_len = (data.get("usage") or {}).get(
-                                    "completion_tokens", output_len
+                                chunk = remove_prefix(
+                                    chunk_bytes.decode("utf-8"), "data: "
                                 )
+                                latency = time.perf_counter() - st
+                                if chunk == "[DONE]":
+                                    pass
+                                else:
+                                    data = json.loads(chunk)
 
-                        output.generated_text = generated_text
-                        output.success = True
-                        output.latency = latency
-                        output.output_len = output_len
-                else:
-                    output.error = response.reason or ""
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
+                                    # Check if this chunk contains content
+                                    delta = data.get("choices", [{}])[0].get(
+                                        "delta", {}
+                                    )
+                                    content = delta.get("content", "")
+
+                                    if content:
+                                        timestamp = time.perf_counter()
+                                        # First token
+                                        if ttft == 0.0:
+                                            ttft = timestamp - st
+                                            output.ttft = ttft
+                                            logger.info(
+                                                f"⚡ First token received for request {id(request_func_input)} - TTFT: {ttft:.3f}s"
+                                            )
+
+                                        # Decoding phase
+                                        else:
+                                            output.itl.append(
+                                                timestamp - most_recent_timestamp
+                                            )
+
+                                        most_recent_timestamp = timestamp
+                                        generated_text += content
+
+                                    # Check for usage info in final chunk
+                                    output_len = (data.get("usage") or {}).get(
+                                        "completion_tokens", output_len
+                                    )
+
+                            output.generated_text = generated_text
+                            output.success = True
+                            output.latency = latency
+                            output.output_len = output_len
+
+                            # Log successful completion for streaming
+                            total_time = time.time() - request_start_time
+                            remaining_unsent = get_remaining_unsent_requests()
+                            logger.info(
+                                f"✅ Request {id(request_func_input)} completed successfully (streaming) - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                            )
+
+                    else:
+                        output.error = response.reason or ""
+                        output.success = False
+                        logger.error(
+                            f"❌ Request {id(request_func_input)} failed with status {response.status}: {output.error}"
+                        )
+            except Exception:
+                output.success = False
+                exc_info = sys.exc_info()
+                output.error = "".join(traceback.format_exception(*exc_info))
+                logger.error(
+                    f"💥 Request {id(request_func_input)} failed with exception: {output.error}"
+                )
+    finally:
+        # Always decrement concurrent request counter
+        concurrent_count = await decrement_concurrent_requests()
+        logger.info(
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count}"
+        )
 
     if pbar:
         pbar.update(1)
@@ -405,70 +569,105 @@ async def async_request_truss(
 
     prompt = request_func_input.prompt
 
-    async with _create_bench_client_session() as session:
-        payload = {
-            "model": request_func_input.model,
-            "prompt": prompt,
-            "temperature": 0.0,
-            "best_of": 1,
-            "max_tokens": request_func_input.output_len,
-            "stream": not args.disable_stream,
-            "ignore_eos": not args.disable_ignore_eos,
-            **request_func_input.extra_request_body,
-        }
-        headers = get_auth_headers()
+    # Increment concurrent request counter and log request start
+    concurrent_count = await increment_concurrent_requests()
+    request_start_time = time.time()
+    remaining_unsent = get_remaining_unsent_requests()
+    logger.info(
+        f"🚀 Sending Truss request to {api_url} - Request ID: {id(request_func_input)} - Prompt length: {request_func_input.prompt_len} tokens - Expected output: {request_func_input.output_len} tokens - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+    )
 
-        output = RequestFuncOutput.init_new(request_func_input)
+    try:
+        async with _create_bench_client_session() as session:
+            payload = {
+                "model": request_func_input.model,
+                "prompt": prompt,
+                "temperature": 0.0,
+                "best_of": 1,
+                "max_tokens": request_func_input.output_len,
+                "stream": not args.disable_stream,
+                "ignore_eos": not args.disable_ignore_eos,
+                **request_func_input.extra_request_body,
+            }
+            headers = get_auth_headers()
 
-        generated_text = ""
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        try:
-            async with session.post(
-                url=api_url, json=payload, headers=headers
-            ) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
+            output = RequestFuncOutput.init_new(request_func_input)
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
-                        latency = time.perf_counter() - st
-                        if chunk == "[DONE]":
-                            pass
-                        else:
-                            data = json.loads(chunk)
+            generated_text = ""
+            ttft = 0.0
+            st = time.perf_counter()
+            most_recent_timestamp = st
+            try:
+                async with session.post(
+                    url=api_url, json=payload, headers=headers
+                ) as response:
+                    if response.status == 200:
+                        async for chunk_bytes in response.content:
+                            chunk_bytes = chunk_bytes.strip()
+                            if not chunk_bytes:
+                                continue
 
-                            # NOTE: Some completion API might have a last
-                            # usage summary response without a token so we
-                            # want to check a token was generated
-                            if data["choices"][0]["text"]:
-                                timestamp = time.perf_counter()
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                            chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
+                            latency = time.perf_counter() - st
+                            if chunk == "[DONE]":
+                                pass
+                            else:
+                                data = json.loads(chunk)
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                                # NOTE: Some completion API might have a last
+                                # usage summary response without a token so we
+                                # want to check a token was generated
+                                if data["choices"][0]["text"]:
+                                    timestamp = time.perf_counter()
+                                    # First token
+                                    if ttft == 0.0:
+                                        ttft = time.perf_counter() - st
+                                        output.ttft = ttft
+                                        logger.info(
+                                            f"⚡ First token received for request {id(request_func_input)} - TTFT: {ttft:.3f}s"
+                                        )
 
-                                most_recent_timestamp = timestamp
-                                generated_text += data["choices"][0]["text"]
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(
+                                            timestamp - most_recent_timestamp
+                                        )
 
-                    output.generated_text = generated_text
-                    output.success = True
-                    output.latency = latency
-                    output.output_len = request_func_input.output_len
-                else:
-                    output.error = response.reason or ""
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
+                                    most_recent_timestamp = timestamp
+                                    generated_text += data["choices"][0]["text"]
+
+                        output.generated_text = generated_text
+                        output.success = True
+                        output.latency = latency
+                        output.output_len = request_func_input.output_len
+
+                        # Log successful completion
+                        total_time = time.time() - request_start_time
+                        remaining_unsent = get_remaining_unsent_requests()
+                        logger.info(
+                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {request_func_input.output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                        )
+
+                    else:
+                        output.error = response.reason or ""
+                        output.success = False
+                        logger.error(
+                            f"❌ Request {id(request_func_input)} failed with status {response.status}: {output.error}"
+                        )
+            except Exception:
+                output.success = False
+                exc_info = sys.exc_info()
+                output.error = "".join(traceback.format_exception(*exc_info))
+                logger.error(
+                    f"💥 Request {id(request_func_input)} failed with exception: {output.error}"
+                )
+    finally:
+        # Always decrement concurrent request counter
+        concurrent_count = await decrement_concurrent_requests()
+        remaining_unsent = get_remaining_unsent_requests()
+        logger.info(
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+        )
 
     if pbar:
         pbar.update(1)
@@ -482,90 +681,123 @@ async def async_request_sglang_generate(
     api_url = request_func_input.api_url
     prompt = request_func_input.prompt
 
-    async with _create_bench_client_session() as session:
-        payload = {
-            ("text" if isinstance(prompt, str) else "input_ids"): prompt,
-            "sampling_params": {
-                "temperature": 0.0,
-                "max_new_tokens": request_func_input.output_len,
-                "ignore_eos": not args.disable_ignore_eos,
-            },
-            "stream": not args.disable_stream,
-            "lora_path": request_func_input.lora_name,
-            "return_logprob": args.return_logprob,
-            "logprob_start_len": -1,
-            **request_func_input.extra_request_body,
-        }
+    # Increment concurrent request counter and log request start
+    concurrent_count = await increment_concurrent_requests()
+    request_start_time = time.time()
+    remaining_unsent = get_remaining_unsent_requests()
+    logger.info(
+        f"🚀 Sending SGLang request to {api_url} - Request ID: {id(request_func_input)} - Prompt length: {request_func_input.prompt_len} tokens - Expected output: {request_func_input.output_len} tokens - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+    )
 
-        # Add image data if available
-        if request_func_input.image_data:
-            payload["image_data"] = request_func_input.image_data
+    try:
+        async with _create_bench_client_session() as session:
+            payload = {
+                ("text" if isinstance(prompt, str) else "input_ids"): prompt,
+                "sampling_params": {
+                    "temperature": 0.0,
+                    "max_new_tokens": request_func_input.output_len,
+                    "ignore_eos": not args.disable_ignore_eos,
+                },
+                "stream": not args.disable_stream,
+                "lora_path": request_func_input.lora_name,
+                "return_logprob": args.return_logprob,
+                "logprob_start_len": -1,
+                **request_func_input.extra_request_body,
+            }
 
-        headers = get_auth_headers()
+            # Add image data if available
+            if request_func_input.image_data:
+                payload["image_data"] = request_func_input.image_data
 
-        output = RequestFuncOutput.init_new(request_func_input)
+            headers = get_auth_headers()
 
-        generated_text = ""
-        output_len = request_func_input.output_len
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        last_output_len = 0
-        try:
-            async with session.post(
-                url=api_url, json=payload, headers=headers
-            ) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
+            output = RequestFuncOutput.init_new(request_func_input)
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
-                        latency = time.perf_counter() - st
-                        if chunk == "[DONE]":
-                            pass
-                        else:
-                            data = json.loads(chunk)
+            generated_text = ""
+            output_len = request_func_input.output_len
+            ttft = 0.0
+            st = time.perf_counter()
+            most_recent_timestamp = st
+            last_output_len = 0
+            try:
+                async with session.post(
+                    url=api_url, json=payload, headers=headers
+                ) as response:
+                    if response.status == 200:
+                        async for chunk_bytes in response.content:
+                            chunk_bytes = chunk_bytes.strip()
+                            if not chunk_bytes:
+                                continue
 
-                            # NOTE: Some completion API might have a last
-                            # usage summary response without a token so we
-                            # want to check a token was generated
-                            if "text" in data and data["text"]:
-                                timestamp = time.perf_counter()
-                                generated_text = data["text"]
-                                output_len = data["meta_info"]["completion_tokens"]
+                            chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
+                            latency = time.perf_counter() - st
+                            if chunk == "[DONE]":
+                                pass
+                            else:
+                                data = json.loads(chunk)
 
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                                # NOTE: Some completion API might have a last
+                                # usage summary response without a token so we
+                                # want to check a token was generated
+                                if "text" in data and data["text"]:
+                                    timestamp = time.perf_counter()
+                                    generated_text = data["text"]
+                                    output_len = data["meta_info"]["completion_tokens"]
 
-                                # Decoding phase
-                                else:
-                                    num_new_tokens = output_len - last_output_len
-                                    if num_new_tokens == 0:
-                                        continue
-                                    adjust_itl = (
-                                        timestamp - most_recent_timestamp
-                                    ) / num_new_tokens
-                                    output.itl.extend([adjust_itl] * num_new_tokens)
+                                    # First token
+                                    if ttft == 0.0:
+                                        ttft = time.perf_counter() - st
+                                        output.ttft = ttft
+                                        logger.info(
+                                            f"⚡ First token received for request {id(request_func_input)} - TTFT: {ttft:.3f}s"
+                                        )
 
-                                most_recent_timestamp = timestamp
-                                last_output_len = output_len
+                                    # Decoding phase
+                                    else:
+                                        num_new_tokens = output_len - last_output_len
+                                        if num_new_tokens == 0:
+                                            continue
+                                        adjust_itl = (
+                                            timestamp - most_recent_timestamp
+                                        ) / num_new_tokens
+                                        output.itl.extend([adjust_itl] * num_new_tokens)
 
-                    output.generated_text = generated_text
-                    output.success = True
-                    output.latency = latency
-                    output.output_len = output_len
-                else:
-                    output.error = response.reason or ""
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
-            print(f"{output.error=}")
+                                    most_recent_timestamp = timestamp
+                                    last_output_len = output_len
+
+                        output.generated_text = generated_text
+                        output.success = True
+                        output.latency = latency
+                        output.output_len = output_len
+
+                        # Log successful completion
+                        total_time = time.time() - request_start_time
+                        remaining_unsent = get_remaining_unsent_requests()
+                        logger.info(
+                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                        )
+
+                    else:
+                        output.error = response.reason or ""
+                        output.success = False
+                        logger.error(
+                            f"❌ Request {id(request_func_input)} failed with status {response.status}: {output.error}"
+                        )
+            except Exception:
+                output.success = False
+                exc_info = sys.exc_info()
+                output.error = "".join(traceback.format_exception(*exc_info))
+                logger.error(
+                    f"💥 Request {id(request_func_input)} failed with exception: {output.error}"
+                )
+                print(f"{output.error=}")
+    finally:
+        # Always decrement concurrent request counter
+        concurrent_count = await decrement_concurrent_requests()
+        remaining_unsent = get_remaining_unsent_requests()
+        logger.info(
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+        )
 
     if pbar:
         pbar.update(1)
@@ -580,19 +812,45 @@ async def async_request_gserver(
 
 
 async def async_request_profile(api_url: str) -> RequestFuncOutput:
-    async with _create_bench_client_session() as session:
-        output = RequestFuncOutput()
-        try:
-            async with session.post(url=api_url) as response:
-                if response.status == 200:
-                    output.success = True
-                else:
-                    output.error = response.reason or ""
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
+    # Increment concurrent request counter and log profile request start
+    concurrent_count = await increment_concurrent_requests()
+    request_start_time = time.time()
+    remaining_unsent = get_remaining_unsent_requests()
+    logger.info(
+        f"🚀 Sending profile request to {api_url} - Request ID: {id(api_url)} - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+    )
+
+    try:
+        async with _create_bench_client_session() as session:
+            output = RequestFuncOutput()
+            try:
+                async with session.post(url=api_url) as response:
+                    if response.status == 200:
+                        output.success = True
+                        total_time = time.time() - request_start_time
+                        logger.info(
+                            f"✅ Profile request {id(api_url)} completed successfully - Total time: {total_time:.3f}s"
+                        )
+                    else:
+                        output.error = response.reason or ""
+                        output.success = False
+                        logger.error(
+                            f"❌ Profile request {id(api_url)} failed with status {response.status}: {output.error}"
+                        )
+            except Exception:
+                output.success = False
+                exc_info = sys.exc_info()
+                output.error = "".join(traceback.format_exception(*exc_info))
+                logger.error(
+                    f"💥 Profile request {id(api_url)} failed with exception: {output.error}"
+                )
+    finally:
+        # Always decrement concurrent request counter
+        concurrent_count = await decrement_concurrent_requests()
+        remaining_unsent = get_remaining_unsent_requests()
+        logger.info(
+            f"🔚 Profile request {id(api_url)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+        )
 
     return output
 
@@ -636,9 +894,12 @@ def get_tokenizer(
 
 
 def get_dataset(args, tokenizer):
+    logger.info(f"📊 Loading dataset: {args.dataset_name}")
+
     tokenize_prompt = getattr(args, "tokenize_prompt", False)
     if args.dataset_name == "sharegpt":
         assert not tokenize_prompt
+        logger.info("📥 Loading ShareGPT dataset...")
         input_requests = sample_sharegpt_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
@@ -648,7 +909,9 @@ def get_dataset(args, tokenizer):
             prompt_suffix=args.prompt_suffix,
             apply_chat_template=args.apply_chat_template,
         )
+        logger.info(f"✅ ShareGPT dataset loaded: {len(input_requests)} requests")
     elif args.dataset_name.startswith("random"):
+        logger.info("🎲 Loading random dataset...")
         input_requests = sample_random_requests(
             input_len=args.random_input_len,
             output_len=args.random_output_len,
@@ -659,8 +922,10 @@ def get_dataset(args, tokenizer):
             random_sample=args.dataset_name == "random",
             return_text=not tokenize_prompt,
         )
+        logger.info(f"✅ Random dataset loaded: {len(input_requests)} requests")
     elif args.dataset_name == "generated-shared-prefix":
         assert not tokenize_prompt
+        logger.info("🔗 Loading generated shared prefix dataset...")
         input_requests = sample_generated_shared_prefix_requests(
             num_groups=args.gsp_num_groups,
             prompts_per_group=args.gsp_prompts_per_group,
@@ -670,8 +935,12 @@ def get_dataset(args, tokenizer):
             tokenizer=tokenizer,
             args=args,
         )
+        logger.info(
+            f"✅ Generated shared prefix dataset loaded: {len(input_requests)} requests"
+        )
     elif args.dataset_name == "mmmu":
         assert not tokenize_prompt
+        logger.info("🖼️ Loading MMMU dataset...")
         input_requests = sample_mmmu_requests(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -679,8 +948,11 @@ def get_dataset(args, tokenizer):
             apply_chat_template=args.apply_chat_template,
             random_sample=True,
         )
+        logger.info(f"✅ MMMU dataset loaded: {len(input_requests)} requests")
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
+
+    logger.info(f"📋 Total dataset size: {len(input_requests)} requests")
     return input_requests
 
 
@@ -1332,6 +1604,17 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
+    # Log benchmark start
+    logger.info(f"🎯 Starting benchmark for backend: {backend}")
+    logger.info(f"📊 Total requests: {len(input_requests)}")
+    logger.info(
+        f"🚀 Request rate: {request_rate if request_rate != float('inf') else 'unlimited'}"
+    )
+    logger.info(
+        f"🔒 Max concurrency: {max_concurrency if max_concurrency else 'unlimited'}"
+    )
+    logger.info(f"🌐 API URL: {api_url}")
+
     # Limit concurrency
     # From https://github.com/vllm-project/vllm/pull/9390
     semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
@@ -1343,7 +1626,7 @@ async def benchmark(
             return await request_func(request_func_input=request_func_input, pbar=pbar)
 
     # Warmup
-    print(f"Starting warmup with {warmup_requests} sequences...")
+    logger.info(f"🔥 Starting warmup with {warmup_requests} sequences...")
 
     # Use the first request for all warmup iterations
     test_request = input_requests[0]
@@ -1381,30 +1664,50 @@ async def benchmark(
             f"are correctly specified. Error: {warmup_outputs[0].error}"
         )
     else:
-        print(
-            f"Warmup completed with {args.warmup_requests} sequences. Starting main benchmark run..."
+        logger.info(
+            f"🔥 Warmup completed with {args.warmup_requests} sequences. Starting main benchmark run..."
         )
 
     # Flush cache
     if ("sglang" in backend and _get_bool_env_var("SGLANG_IS_IN_CI")) or flush_cache:
+        logger.info("🧹 Flushing cache before benchmark...")
         requests.post(base_url + "/flush_cache", headers=get_auth_headers())
 
     time.sleep(1.0)
 
     # Start profiler
     if profile:
-        print("Starting profiler...")
+        logger.info("📊 Starting profiler...")
         profile_output = await async_request_profile(
             api_url=base_url + "/start_profile"
         )
         if profile_output.success:
-            print("Profiler started")
+            logger.info("📊 Profiler started successfully")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     # Run all requests
+    logger.info(
+        f"🏃 Starting main benchmark run with {len(input_requests)} requests..."
+    )
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
+
+    # Add periodic concurrent request count logging
+    async def log_concurrent_status():
+        """Periodically log the current concurrent request count and remaining unsent requests."""
+        while len(tasks) < len(input_requests):
+            await asyncio.sleep(5)  # Log every 5 seconds
+            current_concurrent = get_concurrent_requests()
+            remaining_unsent = get_remaining_unsent_requests()
+            if current_concurrent > 0 or remaining_unsent > 0:
+                logger.info(
+                    f"📊 Current concurrent requests: {current_concurrent}, Remaining unsent: {remaining_unsent}"
+                )
+
+    # Start the concurrent status logging task
+    status_logger_task = asyncio.create_task(log_concurrent_status())
+
     async for request in get_request(input_requests, request_rate):
         if lora_names is not None and len(lora_names) != 0:
             idx = random.randint(0, len(lora_names) - 1)
@@ -1428,14 +1731,21 @@ async def benchmark(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
             )
         )
+        # Update remaining unsent requests count
+        set_remaining_unsent_requests(len(input_requests) - len(tasks))
+
+    # Cancel the status logger task since we're done creating tasks
+    status_logger_task.cancel()
+
+    logger.info(f"📋 All {len(tasks)} tasks created, waiting for completion...")
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     # Stop profiler
     if profile:
-        print("Stopping profiler...")
+        logger.info("📊 Stopping profiler...")
         profile_output = await async_request_profile(api_url=base_url + "/stop_profile")
         if profile_output.success:
-            print("Profiler stopped")
+            logger.info("📊 Profiler stopped successfully")
 
     if pbar is not None:
         pbar.close()
@@ -1456,6 +1766,23 @@ async def benchmark(
 
     # Compute metrics and print results
     benchmark_duration = time.perf_counter() - benchmark_start_time
+    logger.info(f"📈 Benchmark completed in {benchmark_duration:.2f} seconds")
+
+    # Log final concurrent request count and remaining unsent requests
+    final_concurrent = get_concurrent_requests()
+    final_remaining = get_remaining_unsent_requests()
+    if final_concurrent > 0:
+        logger.warning(
+            f"⚠️ Warning: {final_concurrent} requests still active after benchmark completion"
+        )
+    else:
+        logger.info(
+            f"✅ All requests completed successfully - Concurrent requests: {final_concurrent}"
+        )
+
+    if final_remaining > 0:
+        logger.info(f"📋 Remaining unsent requests: {final_remaining}")
+
     metrics, output_lens = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
@@ -1574,6 +1901,19 @@ async def benchmark(
         print(f"Error running benchmark for request rate: {request_rate}")
         print("-" * 30)
 
+    # Log benchmark summary with concurrent request info
+    logger.info(f"📊 Benchmark Summary:")
+    logger.info(f"   • Backend: {backend}")
+    logger.info(f"   • Total requests: {len(input_requests)}")
+    logger.info(f"   • Completed requests: {metrics.completed}")
+    logger.info(f"   • Duration: {benchmark_duration:.2f}s")
+    logger.info(f"   • Request throughput: {metrics.request_throughput:.2f} req/s")
+    logger.info(f"   • Final concurrent requests: {get_concurrent_requests()}")
+    logger.info(f"   • Remaining unsent requests: {get_remaining_unsent_requests()}")
+    logger.info(
+        f"   • Max concurrency limit: {max_concurrency if max_concurrency else 'unlimited'}"
+    )
+
     # Determine output file name
     if args.output_file:
         output_file_name = args.output_file
@@ -1623,6 +1963,10 @@ def run_benchmark(args_: argparse.Namespace):
     global args
     args = args_
 
+    # Log benchmark process start
+    logger.info("🚀 Starting SGLang benchmark process")
+    logger.info(f"📋 Arguments: {args_}")
+
     # Set default value for max_concurrency if not present
     if not hasattr(args, "max_concurrency"):
         args.max_concurrency = None
@@ -1637,7 +1981,7 @@ def run_benchmark(args_: argparse.Namespace):
     if not hasattr(args, "tokenize_prompt"):
         args.tokenize_prompt = False
 
-    print(f"benchmark_args={args}")
+    logger.info(f"📊 Benchmark configuration: {args}")
 
     # Set global environments
     set_ulimit()
@@ -1697,7 +2041,9 @@ def run_benchmark(args_: argparse.Namespace):
             else f"http://{args.host}:{args.port}/v2/models/ensemble/generate_stream"
         )
         if args.model is None:
-            print("Please provide a model using `--model` when using `trt` backend.")
+            logger.error(
+                "Please provide a model using `--model` when using `trt` backend."
+            )
             sys.exit(1)
     elif args.backend == "gserver":
         api_url = args.base_url if args.base_url else f"{args.host}:{args.port}"
@@ -1715,7 +2061,7 @@ def run_benchmark(args_: argparse.Namespace):
     # Get model name
     if args.model is None:
         if args.backend == "truss":
-            print(
+            logger.error(
                 "Please provide a model with `--model` when using truss backend. e.g. --model meta-llama/Llama-3.1-8B-Instruct"
             )
             sys.exit(1)
@@ -1724,54 +2070,66 @@ def run_benchmark(args_: argparse.Namespace):
             model_list = response.json().get("data", [])
             args.model = model_list[0]["id"] if model_list else None
         except Exception as e:
-            print(f"Failed to fetch model from {model_url}. Error: {e}")
-            print(
+            logger.error(f"Failed to fetch model from {model_url}. Error: {e}")
+            logger.error(
                 "Please specify the correct host and port using `--host` and `--port`."
             )
             sys.exit(1)
 
     if args.model is None:
-        print("No model specified or found. Please provide a model using `--model`.")
+        logger.error(
+            "No model specified or found. Please provide a model using `--model`."
+        )
         sys.exit(1)
 
     if not check_chat_template(args.model):
-        print(
+        logger.warning(
             "\nWARNING It is recommended to use the `Chat` or `Instruct` model for benchmarking.\n"
             "Because when the tokenizer counts the output tokens, if there is gibberish, it might count incorrectly.\n"
         )
 
-    print(f"{args}\n")
+    logger.info(f"🔧 Final configuration: {args}\n")
 
     # Read dataset
     backend = args.backend
     model_id = args.model
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
+    logger.info(f"📚 Loading tokenizer: {tokenizer_id}")
     tokenizer = get_tokenizer(tokenizer_id)
+    logger.info(f"📊 Loading dataset: {args.dataset_name}")
     input_requests = get_dataset(args, tokenizer)
+    logger.info(f"📋 Dataset loaded: {len(input_requests)} requests")
 
     # compatible with SimpleNamespace
     if not hasattr(args, "flush_cache"):
         args.flush_cache = False
 
-    return asyncio.run(
-        benchmark(
-            backend=backend,
-            api_url=api_url,
-            base_url=base_url,
-            model_id=model_id,
-            tokenizer=tokenizer,
-            input_requests=input_requests,
-            request_rate=args.request_rate,
-            max_concurrency=args.max_concurrency,
-            disable_tqdm=args.disable_tqdm,
-            lora_names=args.lora_name,
-            extra_request_body=extra_request_body,
-            profile=args.profile,
-            pd_separated=args.pd_separated,
-            flush_cache=args.flush_cache,
-            warmup_requests=args.warmup_requests,
+    logger.info("🏁 Starting benchmark execution...")
+    try:
+        result = asyncio.run(
+            benchmark(
+                backend=backend,
+                api_url=api_url,
+                base_url=base_url,
+                model_id=model_id,
+                tokenizer=tokenizer,
+                input_requests=input_requests,
+                request_rate=args.request_rate,
+                max_concurrency=args.max_concurrency,
+                disable_tqdm=args.disable_tqdm,
+                lora_names=args.lora_name,
+                extra_request_body=extra_request_body,
+                profile=args.profile,
+                pd_separated=args.pd_separated,
+                flush_cache=args.flush_cache,
+                warmup_requests=args.warmup_requests,
+            )
         )
-    )
+        logger.info("🎉 Benchmark completed successfully!")
+        return result
+    except Exception as e:
+        logger.error(f"💥 Benchmark failed with error: {e}")
+        raise
 
 
 def set_ulimit(target_soft_limit=65535):
@@ -1793,7 +2151,17 @@ class LoRAPathAction(argparse.Action):
 
 
 if __name__ == "__main__":
+    logger.info("🚀 SGLang Benchmark Script Starting")
+    logger.info("=" * 50)
+
     parser = ArgumentParser(description="Benchmark the online serving throughput.")
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Set the logging level (default: INFO)",
+    )
     parser.add_argument(
         "--backend",
         type=str,
@@ -2003,4 +2371,21 @@ if __name__ == "__main__":
         help="Target length in tokens for outputs in generated-shared-prefix dataset",
     )
     args = parser.parse_args()
-    run_benchmark(args)
+
+    # Update logging level based on command line argument
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+    logger.info(f"📝 Logging level set to: {args.log_level}")
+
+    logger.info("🏁 Running benchmark with parsed arguments...")
+    try:
+        run_benchmark(args)
+        logger.info("🎉 Benchmark script completed successfully!")
+    except KeyboardInterrupt:
+        logger.warning("⚠️ Benchmark interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"💥 Benchmark script failed: {e}")
+        sys.exit(1)
+    finally:
+        logger.info("=" * 50)
+        logger.info("🏁 SGLang Benchmark Script Finished")
