@@ -554,6 +554,8 @@ def launch_router(args: argparse.Namespace) -> Optional[Router]:
 
         # Validate configuration based on mode
         if router_args.pd_disaggregation:
+            logger.info(f"Using Kyle's sgl-router!")
+
             # Validate PD configuration - skip URL requirements if using service discovery
             if not router_args.service_discovery:
                 if not router_args.prefill_urls:
