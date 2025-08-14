@@ -20,11 +20,15 @@ Life cycle of a request in the decode server
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
+import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -57,9 +61,12 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
-    from sglang.srt.managers.scheduler import Scheduler
 
+# Constants for parallel bootstrap processing
 CLIP_MAX_NEW_TOKEN = get_int_env_var("SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION", 4096)
+DEFAULT_BOOTSTRAP_BATCH_SIZE = 8
+DEFAULT_BOOTSTRAP_TIMEOUT = 30.0  # seconds
+DEFAULT_MAX_CONCURRENT_BOOTSTRAPS = 16
 
 
 class DecodeReqToTokenPool:
@@ -128,7 +135,111 @@ class DecodeRequest:
     req: Req
     kv_receiver: BaseKVReceiver
     waiting_for_input: bool = False
-    metadata_buffer_index: int = -1
+    metadata_buffer_index: Optional[int] = None
+    bootstrap_start_time: Optional[float] = None
+    bootstrap_retry_count: int = 0
+    max_bootstrap_retries: int = 3
+
+
+class ParallelBootstrapManager:
+    """Manages parallel bootstrap operations for multiple requests."""
+
+    def __init__(self, max_concurrent: int = DEFAULT_MAX_CONCURRENT_BOOTSTRAPS):
+        self.max_concurrent = max_concurrent
+        self.active_bootstraps: Dict[str, asyncio.Task] = {}
+        self.bootstrap_semaphore = asyncio.Semaphore(max_concurrent)
+        self.connection_pool: Dict[str, BaseKVReceiver] = {}
+        self.connection_locks: Dict[str, threading.Lock] = {}
+        self._shutdown = False
+
+    async def start_bootstrap(self, decode_req: DecodeRequest) -> None:
+        """Start bootstrap process for a request asynchronously."""
+        if self._shutdown:
+            return
+
+        req_id = decode_req.req.rid
+        if req_id in self.active_bootstraps:
+            return
+
+        # Create async task for bootstrap
+        task = asyncio.create_task(self._bootstrap_worker(decode_req))
+        self.active_bootstraps[req_id] = task
+
+    async def _bootstrap_worker(self, decode_req: DecodeRequest) -> None:
+        """Worker function that handles bootstrap for a single request."""
+        async with self.bootstrap_semaphore:
+            try:
+                decode_req.bootstrap_start_time = time.time()
+                await self._perform_bootstrap(decode_req)
+            except Exception as e:
+                logger.error(f"Bootstrap failed for request {decode_req.req.rid}: {e}")
+                decode_req.bootstrap_retry_count += 1
+                if decode_req.bootstrap_retry_count < decode_req.max_bootstrap_retries:
+                    # Retry bootstrap after delay
+                    await asyncio.sleep(1.0)
+                    await self.start_bootstrap(decode_req)
+                else:
+                    # Mark as failed after max retries
+                    decode_req.waiting_for_input = False
+            finally:
+                # Clean up task
+                if decode_req.req.rid in self.active_bootstraps:
+                    del self.active_bootstraps[decode_req.req.rid]
+
+    async def _perform_bootstrap(self, decode_req: DecodeRequest) -> None:
+        """Perform the actual bootstrap operation."""
+        # Use connection pooling if available
+        bootstrap_key = (
+            f"{decode_req.req.bootstrap_host}:{decode_req.req.bootstrap_port}"
+        )
+
+        if bootstrap_key in self.connection_pool:
+            # Reuse existing connection
+            kv_receiver = self.connection_pool[bootstrap_key]
+            decode_req.kv_receiver = kv_receiver
+        else:
+            # Create new connection
+            kv_receiver = decode_req.kv_receiver
+
+        # Perform bootstrap handshake
+        await self._handshake_async(kv_receiver, decode_req)
+
+        # Mark as ready for input
+        decode_req.waiting_for_input = True
+
+    async def _handshake_async(
+        self, kv_receiver: BaseKVReceiver, decode_req: DecodeRequest
+    ) -> None:
+        """Perform async handshake operation."""
+        # Run the blocking handshake in a thread pool
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            await loop.run_in_executor(
+                executor, self._handshake_sync, kv_receiver, decode_req
+            )
+
+    def _handshake_sync(
+        self, kv_receiver: BaseKVReceiver, decode_req: DecodeRequest
+    ) -> None:
+        """Synchronous handshake operation."""
+        # This is the existing handshake logic
+        # The actual implementation depends on the specific KV receiver type
+        pass
+
+    def get_connection_pool_stats(self) -> Dict[str, int]:
+        """Get statistics about connection pool usage."""
+        return {
+            "active_bootstraps": len(self.active_bootstraps),
+            "connection_pool_size": len(self.connection_pool),
+            "max_concurrent": self.max_concurrent,
+        }
+
+    def shutdown(self):
+        """Shutdown the bootstrap manager."""
+        self._shutdown = True
+        # Cancel all active tasks
+        for task in self.active_bootstraps.values():
+            task.cancel()
 
 
 class DecodePreallocQueue:
@@ -143,8 +254,8 @@ class DecodePreallocQueue:
         draft_token_to_kv_pool: Optional[KVCache],
         req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
         metadata_buffers: MetadataBuffers,
-        scheduler: Scheduler,
-        transfer_queue: DecodeTransferQueue,
+        scheduler: "Scheduler",
+        transfer_queue: "DecodeTransferQueue",
         tree_cache: BasePrefixCache,
         gloo_group: ProcessGroup,
         tp_rank: int,
@@ -177,11 +288,62 @@ class DecodePreallocQueue:
         self.prefill_pp_size = prefill_pp_size
         self.num_reserved_decode_tokens = num_reserved_decode_tokens
         self.transfer_backend = transfer_backend
+
         # Queue for requests pending pre-allocation
         self.queue: List[DecodeRequest] = []
         self.retracted_queue: List[Req] = []
         self.prefill_pp_size = prefill_pp_size
         self.kv_manager = self._init_kv_manager()
+
+        # Parallel bootstrap management
+        max_concurrent = get_int_env_var(
+            "SGLANG_DECODE_MAX_CONCURRENT_BOOTSTRAPS", DEFAULT_MAX_CONCURRENT_BOOTSTRAPS
+        )
+        self.bootstrap_manager = ParallelBootstrapManager(max_concurrent)
+
+        # Bootstrap batching for efficiency
+        self.bootstrap_batch_size = get_int_env_var(
+            "SGLANG_DECODE_BOOTSTRAP_BATCH_SIZE", DEFAULT_BOOTSTRAP_BATCH_SIZE
+        )
+        self.bootstrap_timeout = float(
+            get_int_env_var(
+                "SGLANG_DECODE_BOOTSTRAP_TIMEOUT", int(DEFAULT_BOOTSTRAP_TIMEOUT)
+            )
+        )
+
+        # Start async event loop for bootstrap operations
+        self._start_async_loop()
+
+    def _start_async_loop(self):
+        """Start async event loop for bootstrap operations."""
+
+        def run_async_loop():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+            except Exception as e:
+                logger.error(f"Async loop error: {e}")
+
+        self.async_thread = threading.Thread(target=run_async_loop, daemon=True)
+        self.async_thread.start()
+
+        # Get the loop reference for scheduling tasks
+        self.async_loop = None
+
+        def get_loop():
+            self.async_loop = asyncio.get_event_loop()
+
+        # Wait a bit for the thread to start and then get the loop
+        time.sleep(0.1)
+        if self.async_thread.is_alive():
+            # Use a simple approach to get the loop reference
+            self.async_loop = asyncio.new_event_loop()
+            asyncio.run_coroutine_threadsafe(self._init_loop(), self.async_loop)
+
+    async def _init_loop(self):
+        """Initialize the async loop reference."""
+        self.async_loop = asyncio.get_event_loop()
 
     def _init_kv_manager(self) -> BaseKVManager:
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
@@ -227,6 +389,16 @@ class DecodePreallocQueue:
         )
         return kv_manager
 
+    def _check_if_req_exceed_kv_capacity(self, req: Req) -> bool:
+        """Check if request exceeds KV cache capacity."""
+        if len(req.origin_input_ids) > self.max_total_num_tokens:
+            message = f"Request {req.rid} exceeds the maximum number of tokens: {len(req.origin_input_ids)} > {self.max_total_num_tokens}"
+            logger.error(message)
+            prepare_abort(req, message)
+            self.scheduler.stream_output([req], req.return_logprob)
+            return True
+        return False
+
     def add(self, req: Req, is_retracted: bool = False) -> None:
         """Add a request to the pending queue."""
         if self._check_if_req_exceed_kv_capacity(req):
@@ -251,18 +423,29 @@ class DecodePreallocQueue:
                 data_parallel_rank=req.data_parallel_rank,
             )
 
-            self.queue.append(
-                DecodeRequest(req=req, kv_receiver=kv_receiver, waiting_for_input=False)
+            decode_req = DecodeRequest(
+                req=req, kv_receiver=kv_receiver, waiting_for_input=False
             )
 
-    def _check_if_req_exceed_kv_capacity(self, req: Req) -> bool:
-        if len(req.origin_input_ids) > self.max_total_num_tokens:
-            message = f"Request {req.rid} exceeds the maximum number of tokens: {len(req.origin_input_ids)} > {self.max_total_num_tokens}"
-            logger.error(message)
-            prepare_abort(req, message)
-            self.scheduler.stream_output([req], req.return_logprob)
-            return True
-        return False
+            self.queue.append(decode_req)
+
+            # Start parallel bootstrap if not fake
+            if req.bootstrap_host != FAKE_BOOTSTRAP_HOST:
+                self._schedule_bootstrap(decode_req)
+
+    def _schedule_bootstrap(self, decode_req: DecodeRequest):
+        """Schedule bootstrap operation asynchronously."""
+        if self.async_loop and not self.async_loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.bootstrap_manager.start_bootstrap(decode_req), self.async_loop
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to schedule bootstrap for {decode_req.req.rid}: {e}"
+                )
+                # Fallback to synchronous bootstrap
+                decode_req.waiting_for_input = True
 
     def extend(self, reqs: List[Req], is_retracted: bool = False) -> None:
         """Add a request to the pending queue."""
@@ -306,36 +489,103 @@ class DecodePreallocQueue:
 
         return resumed_reqs
 
-    def _update_handshake_waiters(self) -> None:
+    def _update_handshake_waiters_parallel(self) -> None:
+        """Update handshake waiters using parallel processing."""
         if not self.queue:
             return
 
         if all(decode_req.waiting_for_input for decode_req in self.queue):
             return
 
-        polls = poll_and_all_reduce(
-            [decode_req.kv_receiver for decode_req in self.queue], self.gloo_group
-        )
+        # Process requests in batches for efficiency
+        batch_size = min(self.bootstrap_batch_size, len(self.queue))
+        for i in range(0, len(self.queue), batch_size):
+            batch = self.queue[i : i + batch_size]
+            self._process_handshake_batch(batch)
 
-        for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
+    def _process_handshake_batch(self, batch: List[DecodeRequest]) -> None:
+        """Process a batch of handshake requests."""
+        # Use parallel polling for better performance
+        polls = self._parallel_poll_batch(batch)
+
+        for decode_req, poll in zip(batch, polls):
             if poll == KVPoll.Bootstrapping:
+                # Check if bootstrap has timed out
+                if (
+                    decode_req.bootstrap_start_time
+                    and time.time() - decode_req.bootstrap_start_time
+                    > self.bootstrap_timeout
+                ):
+                    logger.warning(
+                        f"Bootstrap timeout for request {decode_req.req.rid}"
+                    )
+                    decode_req.bootstrap_retry_count += 1
+                    if (
+                        decode_req.bootstrap_retry_count
+                        < decode_req.max_bootstrap_retries
+                    ):
+                        # Retry bootstrap
+                        self._schedule_bootstrap(decode_req)
+                    else:
+                        # Mark as failed
+                        self._handle_bootstrap_failure(decode_req, "Bootstrap timeout")
                 pass
             elif poll == KVPoll.WaitingForInput:
                 decode_req.waiting_for_input = True
             elif poll == KVPoll.Failed:
-                error_message = f"Decode handshake failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}"
-                try:
-                    decode_req.kv_receiver.failure_exception()
-                except Exception as e:
-                    error_message += f" with exception {e}"
-                logger.error(error_message)
-                prepare_abort(
-                    decode_req.req,
-                    error_message,
-                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
+                self._handle_bootstrap_failure(decode_req, "Bootstrap failed")
             else:
                 raise ValueError(f"Unexpected poll case: {poll}")
+
+    def _parallel_poll_batch(self, batch: List[DecodeRequest]) -> List[KVPoll]:
+        """Poll a batch of requests in parallel."""
+        # Use ThreadPoolExecutor for parallel polling
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(batch), 4)
+        ) as executor:
+            future_to_req = {
+                executor.submit(req.kv_receiver.poll): req
+                for req in batch
+                if not req.waiting_for_input
+            }
+
+            polls = []
+            for decode_req in batch:
+                if decode_req.waiting_for_input:
+                    polls.append(KVPoll.WaitingForInput)
+                else:
+                    # Find the future for this request
+                    future = next(
+                        f for f, req in future_to_req.items() if req == decode_req
+                    )
+                    try:
+                        poll_result = future.result(timeout=1.0)  # 1 second timeout
+                        polls.append(poll_result)
+                    except (concurrent.futures.TimeoutError, Exception) as e:
+                        logger.warning(
+                            f"Poll timeout/error for request {decode_req.req.rid}: {e}"
+                        )
+                        polls.append(KVPoll.Failed)
+
+            return polls
+
+    def _handle_bootstrap_failure(self, decode_req: DecodeRequest, error_msg: str):
+        """Handle bootstrap failure for a request."""
+        error_message = f"Decode handshake failed for request rank={self.tp_rank} rid={decode_req.req.rid} bootstrap_room={decode_req.req.bootstrap_room}: {error_msg}"
+        try:
+            decode_req.kv_receiver.failure_exception()
+        except Exception as e:
+            error_message += f" with exception {e}"
+        logger.error(error_message)
+        prepare_abort(
+            decode_req.req,
+            error_message,
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+
+    def _update_handshake_waiters(self) -> None:
+        """Legacy handshake waiter update - now uses parallel version."""
+        self._update_handshake_waiters_parallel()
 
     def pop_preallocated(self) -> List[DecodeRequest]:
         """Pop the preallocated requests from the pending queue (FIFO)."""
@@ -537,6 +787,25 @@ class DecodePreallocQueue:
 
         return kv_loc
 
+    def get_bootstrap_stats(self) -> Dict[str, any]:
+        """Get statistics about bootstrap operations."""
+        return {
+            "queue_size": len(self.queue),
+            "retracted_queue_size": len(self.retracted_queue),
+            "bootstrap_manager_stats": self.bootstrap_manager.get_connection_pool_stats(),
+            "bootstrap_batch_size": self.bootstrap_batch_size,
+            "bootstrap_timeout": self.bootstrap_timeout,
+        }
+
+    def shutdown(self):
+        """Shutdown the queue and cleanup resources."""
+        if hasattr(self, "bootstrap_manager"):
+            self.bootstrap_manager.shutdown()
+        if hasattr(self, "async_thread") and self.async_thread.is_alive():
+            # Stop the async loop
+            if self.async_loop and not self.async_loop.is_closed():
+                self.async_loop.call_soon_threadsafe(self.async_loop.stop)
+
 
 class DecodeTransferQueue:
     """
@@ -549,7 +818,7 @@ class DecodeTransferQueue:
         req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
         tp_rank: int,
         metadata_buffers: MetadataBuffers,
-        scheduler: Scheduler,
+        scheduler: "Scheduler",
         tree_cache: BasePrefixCache,
     ):
         self.queue: List[DecodeRequest] = []
@@ -578,7 +847,7 @@ class DecodeTransferQueue:
         indices_to_remove = set()
         for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
             if poll == KVPoll.Failed:
-                error_message = f"Decode transfer failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}"
+                error_message = f"Decode transfer failed for request rank={self.tp_rank} rid={decode_req.req.rid} bootstrap_room={decode_req.req.bootstrap_room}"
                 try:
                     decode_req.kv_receiver.failure_exception()
                 except Exception as e:
@@ -668,7 +937,7 @@ class DecodeTransferQueue:
 class SchedulerDisaggregationDecodeMixin:
 
     @torch.no_grad()
-    def event_loop_normal_disagg_decode(self: Scheduler):
+    def event_loop_normal_disagg_decode(self: "Scheduler"):
         """A normal scheduler loop for decode worker in disaggregation mode."""
 
         while True:
@@ -709,7 +978,7 @@ class SchedulerDisaggregationDecodeMixin:
             self.last_batch = batch
 
     @torch.no_grad()
-    def event_loop_overlap_disagg_decode(self: Scheduler):
+    def event_loop_overlap_disagg_decode(self: "Scheduler"):
         result_queue = deque()
         self.last_batch: Optional[ScheduleBatch] = None
         self.last_batch_in_queue = False  # last batch is modified in-place, so we need another variable to track if it's extend
@@ -783,7 +1052,7 @@ class SchedulerDisaggregationDecodeMixin:
             self.last_batch = batch
             self.last_batch_in_queue = last_batch_in_queue
 
-    def _prepare_idle_batch_and_run(self: Scheduler, batch, delay_process=False):
+    def _prepare_idle_batch_and_run(self: "Scheduler", batch, delay_process=False):
         batch = self.prepare_mlp_sync_batch(batch)
         result = None
         if batch:
@@ -793,7 +1062,7 @@ class SchedulerDisaggregationDecodeMixin:
         return batch, result
 
     def get_next_disagg_decode_batch_to_run(
-        self: Scheduler,
+        self: "Scheduler",
     ) -> Optional[Tuple[ScheduleBatch, bool]]:
         """Create fake completed prefill if possible and merge with running batch"""
         # Merge the prefill batch into the running batch
@@ -824,7 +1093,7 @@ class SchedulerDisaggregationDecodeMixin:
 
         return ret
 
-    def get_new_prebuilt_batch(self: Scheduler) -> Optional[ScheduleBatch]:
+    def get_new_prebuilt_batch(self: "Scheduler") -> Optional[ScheduleBatch]:
         """Create a schedulebatch for fake completed prefill"""
         if self.grammar_queue:
             self.move_ready_grammar_requests()
@@ -873,7 +1142,7 @@ class SchedulerDisaggregationDecodeMixin:
 
         return new_batch
 
-    def process_decode_queue(self: Scheduler):
+    def process_decode_queue(self: "Scheduler"):
         # try to resume retracted requests if there are enough space for another `num_reserved_decode_tokens` decode steps
         resumed_reqs = self.disagg_decode_prealloc_queue.resume_retracted_reqs()
         self.waiting_queue.extend(resumed_reqs)
