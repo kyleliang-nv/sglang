@@ -24,23 +24,87 @@ AIOHTTP_STREAM_READ_CHUNK_SIZE = (
 )  # 64KB, to prevent aiohttp's "Chunk too big" error
 
 
-def setup_logger():
+def setup_logger(
+    log_level="INFO",
+    log_file=None,
+    log_format="detailed",
+    enable_request_logging=True,
+    enable_debug_logging=False,
+):
     logger = logging.getLogger("pdlb")
-    logger.setLevel(logging.INFO)
 
-    formatter = logging.Formatter(
-        "[PDLB (Python)] %(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    # Set log level
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f"Invalid log level: {log_level}")
 
-    handler = logging.StreamHandler()
+    logger.setLevel(numeric_level)
+
+    # Clear existing handlers to avoid duplicates
+    logger.handlers.clear()
+
+    # Create formatter based on format choice
+    if log_format == "detailed":
+        formatter = logging.Formatter(
+            "[PDLB (Python)] %(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    elif log_format == "simple":
+        formatter = logging.Formatter("[PDLB] %(levelname)s - %(message)s")
+    elif log_format == "json":
+        import json
+
+        class JSONFormatter(logging.Formatter):
+            def format(self, record):
+                log_entry = {
+                    "timestamp": self.formatTime(record),
+                    "level": record.levelname,
+                    "logger": "pdlb",
+                    "message": record.getMessage(),
+                }
+                if hasattr(record, "funcName"):
+                    log_entry["function"] = record.funcName
+                if hasattr(record, "lineno"):
+                    log_entry["line"] = record.lineno
+                return json.dumps(log_entry)
+
+        formatter = JSONFormatter()
+    else:
+        raise ValueError(f"Invalid log format: {log_format}")
+
+    # Create handler
+    if log_file:
+        handler = logging.FileHandler(log_file)
+        logger.info(f"Logging to file: {log_file}")
+    else:
+        handler = logging.StreamHandler()
+
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+    # Set global flags for conditional logging
+    global ENABLE_REQUEST_LOGGING, ENABLE_DEBUG_LOGGING
+    ENABLE_REQUEST_LOGGING = enable_request_logging
+    ENABLE_DEBUG_LOGGING = enable_debug_logging
+
+    logger.info(
+        f"Logger initialized with level={log_level}, format={log_format}, file={log_file}"
+    )
+    logger.info(
+        f"Request logging: {'enabled' if enable_request_logging else 'disabled'}"
+    )
+    logger.info(f"Debug logging: {'enabled' if enable_debug_logging else 'disabled'}")
 
     return logger
 
 
-logger = setup_logger()
+# Global request counter for tracking
+request_counter = 0
+
+# Global flags for conditional logging
+ENABLE_REQUEST_LOGGING = True
+ENABLE_DEBUG_LOGGING = False
+logger = setup_logger()  # Initialize with defaults
 
 
 @dataclasses.dataclass
@@ -54,13 +118,22 @@ class MiniLoadBalancer:
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
+        logger.info(
+            f"MiniLoadBalancer initialized with {len(self.prefill_configs)} prefill servers and {len(self.decode_servers)} decode servers"
+        )
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
         self.prefill_servers.append(new_prefill_config.url)
+        logger.info(
+            f"Added prefill server: {new_prefill_config.url} (total: {len(self.prefill_servers)})"
+        )
 
     def add_decode_server(self, new_decode_server: str):
         self.decode_servers.append(new_decode_server)
+        logger.info(
+            f"Added decode server: {new_decode_server} (total: {len(self.decode_servers)})"
+        )
 
     def select_pair(self):
         # TODO: return some message instead of panic
@@ -69,11 +142,16 @@ class MiniLoadBalancer:
 
         prefill_config = random.choice(self.prefill_configs)
         decode_server = random.choice(self.decode_servers)
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(
+                f"Selected prefill: {prefill_config.url}, decode: {decode_server}"
+            )
         return prefill_config.url, prefill_config.bootstrap_port, decode_server
 
     async def generate(
         self, modified_request, prefill_server, decode_server, endpoint
     ) -> ORJSONResponse:
+        logger.info(f"Starting non-streaming generation via {endpoint}")
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
         async with aiohttp.ClientSession(
@@ -81,16 +159,29 @@ class MiniLoadBalancer:
                 total=3600
             )  # Add timeout for request reliability
         ) as session:
+            if ENABLE_DEBUG_LOGGING:
+                logger.debug(
+                    f"Sending requests to prefill: {prefill_server}/{endpoint}, decode: {decode_server}/{endpoint}"
+                )
             tasks = [
                 session.post(f"{prefill_server}/{endpoint}", json=modified_request),
                 session.post(f"{decode_server}/{endpoint}", json=modified_request),
             ]
 
             # Wait for both responses to complete. Prefill should end first.
-            prefill_response, decode_response = await asyncio.gather(*tasks)
+            try:
+                prefill_response, decode_response = await asyncio.gather(*tasks)
+                if ENABLE_DEBUG_LOGGING:
+                    logger.debug(
+                        f"Both responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
+                    )
+            except Exception as e:
+                logger.error(f"Error during parallel requests: {e}")
+                raise
 
             if "return_logprob" in modified_request:
-
+                if ENABLE_DEBUG_LOGGING:
+                    logger.debug("Processing logprob merge")
                 prefill_json = await prefill_response.json()
                 ret_json = await decode_response.json()
 
@@ -104,6 +195,7 @@ class MiniLoadBalancer:
             else:
                 ret_json = await decode_response.json()
 
+            logger.info(f"Generation completed successfully via {endpoint}")
             return ORJSONResponse(
                 content=ret_json,
                 status_code=decode_response.status,
@@ -112,6 +204,7 @@ class MiniLoadBalancer:
     async def generate_stream(
         self, modified_request, prefill_server, decode_server, endpoint="generate"
     ):
+        logger.info(f"Starting streaming generation via {endpoint}")
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
         async def stream_results():
@@ -120,15 +213,29 @@ class MiniLoadBalancer:
                     total=3600
                 )  # Add timeout for request reliability
             ) as session:
+                if ENABLE_DEBUG_LOGGING:
+                    logger.debug(
+                        f"Sending streaming requests to prefill: {prefill_server}/{endpoint}, decode: {decode_server}/{endpoint}"
+                    )
                 # Create the tasks for both prefill and decode requests
                 tasks = [
                     session.post(f"{prefill_server}/{endpoint}", json=modified_request),
                     session.post(f"{decode_server}/{endpoint}", json=modified_request),
                 ]
                 # Wait for both responses to complete. Since this is streaming, they return immediately.
-                prefill_response, decode_response = await asyncio.gather(*tasks)
+                try:
+                    prefill_response, decode_response = await asyncio.gather(*tasks)
+                    if ENABLE_DEBUG_LOGGING:
+                        logger.debug(
+                            f"Streaming responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
+                        )
+                except Exception as e:
+                    logger.error(f"Error during streaming parallel requests: {e}")
+                    raise
 
                 if modified_request.get("return_logprob", False):
+                    if ENABLE_DEBUG_LOGGING:
+                        logger.debug("Processing streaming logprob merge")
                     prefill_chunks = []
                     async for chunk in prefill_response.content:
                         prefill_chunks.append(chunk)
@@ -159,11 +266,14 @@ class MiniLoadBalancer:
                         else:
                             yield chunk
                 else:
+                    if ENABLE_DEBUG_LOGGING:
+                        logger.debug("Streaming decode response without logprob")
                     async for chunk in decode_response.content.iter_chunked(
                         AIOHTTP_STREAM_READ_CHUNK_SIZE
                     ):
                         yield chunk
 
+        logger.info(f"Streaming generation setup completed via {endpoint}")
         return StreamingResponse(
             stream_results(),
             media_type="text/event-stream",
@@ -176,43 +286,81 @@ load_balancer: Optional[MiniLoadBalancer] = None
 
 @app.get("/health")
 async def health_check():
+    logger.debug("Health check endpoint called")
     return Response(status_code=200)
 
 
 @app.get("/health_generate")
 async def health_check():
+    logger.info("Health generate endpoint called")
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for health check")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
     prefill_servers, decode_servers = (
         load_balancer.prefill_servers,
         load_balancer.decode_servers,
     )
+    logger.info(
+        f"Checking health of {len(prefill_servers)} prefill and {len(decode_servers)} decode servers"
+    )
+
     async with aiohttp.ClientSession() as session:
         # Create the tasks
         tasks = []
         for server in chain(prefill_servers, decode_servers):
             tasks.append(session.post(f"{server}/health_generate"))
-        for i, response in enumerate(asyncio.as_completed(tasks)):
-            await response
+
+        try:
+            for i, response in enumerate(asyncio.as_completed(tasks)):
+                await response
+            logger.info("All servers responded to health check")
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Health check failed: {e}")
+
     return Response(status_code=200)
 
 
 @app.post("/flush_cache")
 async def flush_cache():
+    logger.info("Flush cache endpoint called")
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for flush cache")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
     prefill_servers, decode_servers = (
         load_balancer.prefill_servers,
         load_balancer.decode_servers,
     )
+    logger.info(
+        f"Flushing cache on {len(prefill_servers)} prefill and {len(decode_servers)} decode servers"
+    )
+
     async with aiohttp.ClientSession() as session:
         # Create the tasks
         tasks = []
         for server in chain(prefill_servers, decode_servers):
             tasks.append(session.post(f"{server}/flush_cache"))
-        for i, response in enumerate(asyncio.as_completed(tasks)):
-            await response
+
+        try:
+            for i, response in enumerate(asyncio.as_completed(tasks)):
+                await response
+            logger.info("Cache flush completed for all servers")
+        except Exception as e:
+            logger.error(f"Cache flush failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Cache flush failed: {e}")
+
     return Response(status_code=200)
 
 
 @app.get("/get_server_info")
 async def get_server_info():
+    logger.debug("Get server info endpoint called")
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for get server info")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
     prefill_servers, decode_servers = (
         load_balancer.prefill_servers,
         load_balancer.decode_servers,
@@ -222,19 +370,38 @@ async def get_server_info():
     all_internal_states = []
 
     async with aiohttp.ClientSession() as session:
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(
+                f"Fetching server info from {len(prefill_servers)} prefill servers"
+            )
         for server in chain(prefill_servers):
-            server_info = await session.get(f"{server}/get_server_info")
-            prefill_infos.append(await server_info.json())
+            try:
+                server_info = await session.get(f"{server}/get_server_info")
+                prefill_infos.append(await server_info.json())
+            except Exception as e:
+                logger.error(f"Failed to get info from prefill server {server}: {e}")
+
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(
+                f"Fetching server info from {len(decode_servers)} decode servers"
+            )
         for server in chain(decode_servers):
-            server_info = await session.get(f"{server}/get_server_info")
-            info_json = await server_info.json()
-            decode_infos.append(info_json)
-            # Extract internal_states from decode servers
-            if "internal_states" in info_json:
-                all_internal_states.extend(info_json["internal_states"])
+            try:
+                server_info = await session.get(f"{server}/get_server_info")
+                info_json = await server_info.json()
+                decode_infos.append(info_json)
+                # Extract internal_states from decode servers
+                if "internal_states" in info_json:
+                    all_internal_states.extend(info_json["internal_states"])
+            except Exception as e:
+                logger.error(f"Failed to get info from decode server {server}: {e}")
 
     # Return format expected by bench_one_batch_server.py
     if all_internal_states:
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(
+                f"Returning server info with {len(all_internal_states)} internal states"
+            )
         return {
             "internal_states": all_internal_states,
             "prefill": prefill_infos,
@@ -242,6 +409,7 @@ async def get_server_info():
         }
     else:
         # Fallback with dummy data if no internal states found
+        logger.warning("No internal states found, returning dummy data")
         return {
             "internal_states": [
                 {
@@ -256,6 +424,7 @@ async def get_server_info():
 
 @app.get("/get_model_info")
 async def get_model_info():
+    logger.debug("Get model info endpoint called")
     # Dummy model information
     model_info = {
         "model_path": "/path/to/dummy/model",
@@ -268,25 +437,114 @@ async def get_model_info():
 
 @app.post("/generate")
 async def handle_generate_request(request_data: dict):
-    prefill_server, bootstrap_port, decode_server = load_balancer.select_pair()
+    global request_counter
+    request_counter += 1
 
-    # Parse and transform prefill_server for bootstrap data
-    parsed_url = urllib.parse.urlparse(prefill_server)
-    hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
-    modified_request = request_data.copy()
-
-    batch_size = _get_request_batch_size(modified_request)
-    if batch_size is not None:
-        modified_request.update(
-            {
-                "bootstrap_host": [hostname] * batch_size,
-                "bootstrap_port": [bootstrap_port] * batch_size,
-                "bootstrap_room": [
-                    _generate_bootstrap_room() for _ in range(batch_size)
-                ],
-            }
-        )
+    if ENABLE_REQUEST_LOGGING:
+        logger.info(f"POST /generate request #{request_counter} received")
+        logger.info(f"Request data: {request_data}")
     else:
+        logger.debug(f"POST /generate request #{request_counter} received")
+
+    if load_balancer is None:
+        logger.error("Load balancer not initialized")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
+    try:
+        prefill_server, bootstrap_port, decode_server = load_balancer.select_pair()
+        if ENABLE_REQUEST_LOGGING:
+            logger.info(
+                f"Selected servers - prefill: {prefill_server}, decode: {decode_server}, bootstrap_port: {bootstrap_port}"
+            )
+        else:
+            logger.debug(
+                f"Selected servers - prefill: {prefill_server}, decode: {decode_server}, bootstrap_port: {bootstrap_port}"
+            )
+
+        # Parse and transform prefill_server for bootstrap data
+        parsed_url = urllib.parse.urlparse(prefill_server)
+        hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
+        modified_request = request_data.copy()
+
+        batch_size = _get_request_batch_size(modified_request)
+        if batch_size is not None:
+            if ENABLE_DEBUG_LOGGING:
+                logger.debug(f"Batch request detected with size: {batch_size}")
+            modified_request.update(
+                {
+                    "bootstrap_host": [hostname] * batch_size,
+                    "bootstrap_port": [bootstrap_port] * batch_size,
+                    "bootstrap_room": [
+                        _generate_bootstrap_room() for _ in range(batch_size)
+                    ],
+                }
+            )
+        else:
+            if ENABLE_DEBUG_LOGGING:
+                logger.debug("Single request detected")
+            modified_request.update(
+                {
+                    "bootstrap_host": hostname,
+                    "bootstrap_port": bootstrap_port,
+                    "bootstrap_room": _generate_bootstrap_room(),
+                }
+            )
+
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(f"Modified request: {modified_request}")
+
+        if request_data.get("stream", False):
+            if ENABLE_REQUEST_LOGGING:
+                logger.info(
+                    f"Returning streaming response for request #{request_counter}"
+                )
+            return await load_balancer.generate_stream(
+                modified_request, prefill_server, decode_server, "generate"
+            )
+        else:
+            if ENABLE_REQUEST_LOGGING:
+                logger.info(
+                    f"Returning non-streaming response for request #{request_counter}"
+                )
+            return await load_balancer.generate(
+                modified_request, prefill_server, decode_server, "generate"
+            )
+    except Exception as e:
+        logger.error(f"Error in handle_generate_request #{request_counter}: {e}")
+        if ENABLE_REQUEST_LOGGING:
+            logger.error(f"Request data that caused error: {request_data}")
+        raise
+
+
+async def _forward_to_backend(request_data: dict, endpoint_name: str):
+    global request_counter
+    request_counter += 1
+
+    if ENABLE_REQUEST_LOGGING:
+        logger.info(f"POST /{endpoint_name} request #{request_counter} received")
+        logger.info(f"Request data: {request_data}")
+    else:
+        logger.debug(f"POST /{endpoint_name} request #{request_counter} received")
+
+    if load_balancer is None:
+        logger.error("Load balancer not initialized")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
+    try:
+        prefill_server, bootstrap_port, decode_server = load_balancer.select_pair()
+        if ENABLE_REQUEST_LOGGING:
+            logger.info(
+                f"Selected servers for {endpoint_name} - prefill: {prefill_server}, decode: {decode_server}"
+            )
+        else:
+            logger.debug(
+                f"Selected servers for {endpoint_name} - prefill: {prefill_server}, decode: {decode_server}"
+            )
+
+        # Parse and transform prefill_server for bootstrap data
+        parsed_url = urllib.parse.urlparse(prefill_server)
+        hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
+        modified_request = request_data.copy()
         modified_request.update(
             {
                 "bootstrap_host": hostname,
@@ -295,45 +553,38 @@ async def handle_generate_request(request_data: dict):
             }
         )
 
-    if request_data.get("stream", False):
-        return await load_balancer.generate_stream(
-            modified_request, prefill_server, decode_server, "generate"
-        )
-    else:
-        return await load_balancer.generate(
-            modified_request, prefill_server, decode_server, "generate"
-        )
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(f"Modified request for {endpoint_name}: {modified_request}")
 
-
-async def _forward_to_backend(request_data: dict, endpoint_name: str):
-    prefill_server, bootstrap_port, decode_server = load_balancer.select_pair()
-
-    # Parse and transform prefill_server for bootstrap data
-    parsed_url = urllib.parse.urlparse(prefill_server)
-    hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
-    modified_request = request_data.copy()
-    modified_request.update(
-        {
-            "bootstrap_host": hostname,
-            "bootstrap_port": bootstrap_port,
-            "bootstrap_room": _generate_bootstrap_room(),
-        }
-    )
-
-    if request_data.get("stream", False):
-        return await load_balancer.generate_stream(
-            modified_request,
-            prefill_server,
-            decode_server,
-            endpoint=endpoint_name,
+        if request_data.get("stream", False):
+            if ENABLE_REQUEST_LOGGING:
+                logger.info(
+                    f"Returning streaming response for {endpoint_name} request #{request_counter}"
+                )
+            return await load_balancer.generate_stream(
+                modified_request,
+                prefill_server,
+                decode_server,
+                endpoint=endpoint_name,
+            )
+        else:
+            if ENABLE_REQUEST_LOGGING:
+                logger.info(
+                    f"Returning non-streaming response for {endpoint_name} request #{request_counter}"
+                )
+            return await load_balancer.generate(
+                modified_request,
+                prefill_server,
+                decode_server,
+                endpoint=endpoint_name,
+            )
+    except Exception as e:
+        logger.error(
+            f"Error in _forward_to_backend for {endpoint_name} request #{request_counter}: {e}"
         )
-    else:
-        return await load_balancer.generate(
-            modified_request,
-            prefill_server,
-            decode_server,
-            endpoint=endpoint_name,
-        )
+        if ENABLE_REQUEST_LOGGING:
+            logger.error(f"Request data that caused error: {request_data}")
+        raise
 
 
 @app.post("/v1/chat/completions")
@@ -347,63 +598,120 @@ async def handle_completion_request(request_data: dict):
 
 
 def _generate_bootstrap_room():
-    return random.randint(0, 2**63 - 1)
+    room_id = random.randint(0, 2**63 - 1)
+    if ENABLE_DEBUG_LOGGING:
+        logger.debug(f"Generated bootstrap room ID: {room_id}")
+    return room_id
 
 
 # We may utilize `GenerateReqInput`'s logic later
 def _get_request_batch_size(request):
     if (text := request.get("text")) is not None:
-        return None if isinstance(text, str) else len(text)
+        batch_size = None if isinstance(text, str) else len(text)
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(f"Batch size from text: {batch_size}")
+        return batch_size
     if (input_ids := request.get("input_ids")) is not None:
-        return None if isinstance(input_ids[0], int) else len(input_ids)
+        batch_size = None if isinstance(input_ids[0], int) else len(input_ids)
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(f"Batch size from input_ids: {batch_size}")
+        return batch_size
+    if ENABLE_DEBUG_LOGGING:
+        logger.debug("No batch size detected")
     return None
 
 
 @app.get("/v1/models")
 async def get_models():
+    logger.debug("Get models endpoint called")
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for get models")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
     prefill_server = load_balancer.prefill_servers[0]  # Get the first prefill server
+    logger.info(f"Fetching models from prefill server: {prefill_server}")
+
     async with aiohttp.ClientSession() as session:
         try:
             response = await session.get(f"{prefill_server}/v1/models")
             if response.status != 200:
+                logger.error(f"Prefill server error: Status {response.status}")
                 raise HTTPException(
                     status_code=response.status,
                     detail=f"Prefill server error: Status {response.status}",
                 )
-            return ORJSONResponse(content=await response.json())
+            models = await response.json()
+            logger.info(f"Successfully retrieved models from prefill server")
+            return ORJSONResponse(content=models)
         except Exception as e:
+            logger.error(f"Failed to fetch models: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/register")
 async def register(obj: PDRegistryRequest):
-    if obj.mode == "prefill":
-        load_balancer.add_prefill_server(
-            PrefillConfig(obj.registry_url, obj.bootstrap_port)
-        )
-        logger.info(
-            f"Registered prefill server: {obj.registry_url} with bootstrap port: {obj.bootstrap_port}"
-        )
-    elif obj.mode == "decode":
-        load_balancer.add_decode_server(obj.registry_url)
-        logger.info(f"Registered decode server: {obj.registry_url}")
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid mode. Must be either PREFILL or DECODE.",
-        )
-
     logger.info(
-        f"#Prefill servers: {len(load_balancer.prefill_configs)}, "
-        f"#Decode servers: {len(load_balancer.decode_servers)}"
+        f"Registration request received: mode={obj.mode}, url={obj.registry_url}"
     )
 
-    return Response(status_code=200)
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for registration")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
+    try:
+        if obj.mode == "prefill":
+            load_balancer.add_prefill_server(
+                PrefillConfig(obj.registry_url, obj.bootstrap_port)
+            )
+            logger.info(
+                f"Registered prefill server: {obj.registry_url} with bootstrap port: {obj.bootstrap_port}"
+            )
+        elif obj.mode == "decode":
+            load_balancer.add_decode_server(obj.registry_url)
+            logger.info(f"Registered decode server: {obj.registry_url}")
+        else:
+            logger.error(f"Invalid registration mode: {obj.mode}")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid mode. Must be either PREFILL or DECODE.",
+            )
+
+        logger.info(
+            f"Registration completed. #Prefill servers: {len(load_balancer.prefill_configs)}, "
+            f"#Decode servers: {len(load_balancer.decode_servers)}"
+        )
+
+        return Response(status_code=200)
+    except Exception as e:
+        logger.error(f"Registration failed: {e}")
+        raise
 
 
-def run(prefill_configs, decode_addrs, host, port):
-    global load_balancer
+def run(
+    prefill_configs,
+    decode_addrs,
+    host,
+    port,
+    log_level="INFO",
+    log_file=None,
+    log_format="detailed",
+    enable_request_logging=True,
+    enable_debug_logging=False,
+):
+    global load_balancer, logger
+
+    # Reconfigure logger with new settings
+    logger = setup_logger(
+        log_level, log_file, log_format, enable_request_logging, enable_debug_logging
+    )
+
+    logger.info(f"Starting mini load balancer on {host}:{port}")
+    logger.info(f"Initial prefill configs: {prefill_configs}")
+    logger.info(f"Initial decode addresses: {decode_addrs}")
+
     load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs)
+    logger.info("Load balancer initialized successfully")
+
     uvicorn.run(app, host=host, port=port)
 
 
