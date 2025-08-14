@@ -14,6 +14,12 @@ class LBArgs:
     decode_infos: list = dataclasses.field(default_factory=list)
     log_interval: int = 5
     timeout: int = 600
+    # Logging control arguments
+    log_level: str = "INFO"
+    log_file: str = None
+    log_format: str = "detailed"
+    enable_request_logging: bool = True
+    enable_debug_logging: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -73,6 +79,37 @@ class LBArgs:
             default=LBArgs.timeout,
             help=f"Timeout in seconds (default: {LBArgs.timeout})",
         )
+        # Logging control arguments
+        parser.add_argument(
+            "--log-level",
+            type=str,
+            default=LBArgs.log_level,
+            choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+            help=f"Set the logging level (default: {LBArgs.log_level})",
+        )
+        parser.add_argument(
+            "--log-file",
+            type=str,
+            default=LBArgs.log_file,
+            help="Log to a file instead of stdout (default: None)",
+        )
+        parser.add_argument(
+            "--log-format",
+            type=str,
+            default=LBArgs.log_format,
+            choices=["detailed", "simple", "json"],
+            help=f"Log format style (default: {LBArgs.log_format})",
+        )
+        parser.add_argument(
+            "--disable-request-logging",
+            action="store_true",
+            help="Disable detailed request logging to reduce log verbosity",
+        )
+        parser.add_argument(
+            "--enable-debug-logging",
+            action="store_true",
+            help="Enable debug-level logging for detailed debugging",
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "LBArgs":
@@ -100,6 +137,11 @@ class LBArgs:
             decode_infos=args.decode,
             log_interval=args.log_interval,
             timeout=args.timeout,
+            log_level=args.log_level,
+            log_file=args.log_file,
+            log_format=args.log_format,
+            enable_request_logging=not args.disable_request_logging,
+            enable_debug_logging=args.enable_debug_logging,
         )
 
     def __post_init__(self):
@@ -118,7 +160,19 @@ def main():
     lb_args = LBArgs.from_cli_args(args)
 
     prefill_configs = [PrefillConfig(url, port) for url, port in lb_args.prefill_infos]
-    run(prefill_configs, lb_args.decode_infos, lb_args.host, lb_args.port)
+
+    # Pass logging configuration to mini_lb
+    run(
+        prefill_configs,
+        lb_args.decode_infos,
+        lb_args.host,
+        lb_args.port,
+        log_level=lb_args.log_level,
+        log_file=lb_args.log_file,
+        log_format=lb_args.log_format,
+        enable_request_logging=lb_args.enable_request_logging,
+        enable_debug_logging=lb_args.enable_debug_logging,
+    )
 
 
 if __name__ == "__main__":
