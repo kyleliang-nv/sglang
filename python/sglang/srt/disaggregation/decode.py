@@ -42,6 +42,7 @@ from sglang.srt.disaggregation.utils import (
     MetadataBuffers,
     ReqToMetadataIdxAllocator,
     TransferBackend,
+    get_int_env_var,
     get_kv_class,
     is_mla_backend,
     kv_to_page_indices,
@@ -55,7 +56,7 @@ from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.memory_pool import KVCache, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
-from sglang.srt.utils import get_int_env_var, require_mlp_sync
+from sglang.srt.utils import require_mlp_sync
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +64,71 @@ if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
 
 # Constants for parallel bootstrap processing
-CLIP_MAX_NEW_TOKEN = 2048
+CLIP_MAX_NEW_TOKEN = get_int_env_var("SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION", 4096)
 DEFAULT_BOOTSTRAP_BATCH_SIZE = 8
 DEFAULT_BOOTSTRAP_TIMEOUT = 30.0  # seconds
 DEFAULT_MAX_CONCURRENT_BOOTSTRAPS = 16
+
+
+class DecodeReqToTokenPool:
+    """
+    The difference of DecodeReqToTokenPool and ReqToTokenPool is that
+    DecodeReqToTokenPool subscribes memory for pre-allocated requests.
+
+    In ReqToTokenPool, if `--max-running-requests` is 8,
+    #pre-allocated + #transfer + #running <= 8, but there are in fact more memory can carry pre-allocated requests.
+
+    In DecodeReqToTokenPool, if `--max-running-requests` is 8,
+    #running <= 8, #pre-allocated + #transfer <= pre_alloc_size, so we can use the free memory to pre-allocate requests to unblock prefill.
+    """
+
+    def __init__(
+        self,
+        size: int,
+        max_context_len: int,
+        device: str,
+        enable_memory_saver: bool,
+        pre_alloc_size: int,
+    ):
+        memory_saver_adapter = TorchMemorySaverAdapter.create(
+            enable=enable_memory_saver
+        )
+
+        self.size = size
+        self.max_context_len = max_context_len
+        self.device = device
+        self.pre_alloc_size = pre_alloc_size
+        with memory_saver_adapter.region(tag=GPU_MEMORY_TYPE_KV_CACHE):
+            self.req_to_token = torch.zeros(
+                (size + pre_alloc_size, max_context_len),
+                dtype=torch.int32,
+                device=device,
+            )
+
+        self.free_slots = list(range(size + pre_alloc_size))
+
+    def write(self, indices, values):
+        self.req_to_token[indices] = values
+
+    def available_size(self):
+        return len(self.free_slots)
+
+    def alloc(self, need_size: int) -> List[int]:
+        if need_size > len(self.free_slots):
+            return None
+
+        select_index = self.free_slots[:need_size]
+        self.free_slots = self.free_slots[need_size:]
+        return select_index
+
+    def free(self, free_index: Union[int, List[int]]):
+        if isinstance(free_index, (int,)):
+            self.free_slots.append(free_index)
+        else:
+            self.free_slots.extend(free_index)
+
+    def clear(self):
+        self.free_slots = list(range(self.size + self.pre_alloc_size))
 
 
 @dataclass
@@ -510,7 +572,7 @@ class DecodePreallocQueue:
 
     def _handle_bootstrap_failure(self, decode_req: DecodeRequest, error_msg: str):
         """Handle bootstrap failure for a request."""
-        error_message = f"Decode handshake failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}: {error_msg}"
+        error_message = f"Decode handshake failed for request rank={self.tp_rank} rid={decode_req.req.rid} bootstrap_room={decode_req.req.bootstrap_room}: {error_msg}"
         try:
             decode_req.kv_receiver.failure_exception()
         except Exception as e:
@@ -690,12 +752,38 @@ class DecodePreallocQueue:
         req.req_pool_idx = req_pool_indices[0]
 
         if self.token_to_kv_pool_allocator.page_size == 1:
-            kv_loc = self.token_to_kv_pool_allocator.alloc(len(req.origin_input_ids))
-        else:
             kv_loc = self.token_to_kv_pool_allocator.alloc(
-                len(req.origin_input_ids), req.origin_input_ids
+                len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+            )
+        else:
+            num_tokens = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+            kv_loc = self.token_to_kv_pool_allocator.alloc_extend(
+                prefix_lens=torch.tensor(
+                    [0],
+                    dtype=torch.int64,
+                    device=self.token_to_kv_pool_allocator.device,
+                ),
+                seq_lens=torch.tensor(
+                    [num_tokens],
+                    dtype=torch.int64,
+                    device=self.token_to_kv_pool_allocator.device,
+                ),
+                last_loc=torch.tensor(
+                    [-1],
+                    dtype=torch.int64,
+                    device=self.token_to_kv_pool_allocator.device,
+                ),
+                extend_num_tokens=num_tokens,
             )
 
+        assert (
+            kv_loc is not None
+        ), "KV cache is full! There is a bug in memory estimation."
+
+        self.req_to_token_pool.write((req.req_pool_idx, slice(0, len(kv_loc))), kv_loc)
+
+        # populate metadata
+        req.fill_ids = req.origin_input_ids + req.output_ids
         req.extend_input_len = len(req.origin_input_ids)
 
         return kv_loc
@@ -760,7 +848,7 @@ class DecodeTransferQueue:
         indices_to_remove = set()
         for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
             if poll == KVPoll.Failed:
-                error_message = f"Decode transfer failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}"
+                error_message = f"Decode transfer failed for request rank={self.tp_rank} rid={decode_req.req.rid} bootstrap_room={decode_req.req.bootstrap_room}"
                 try:
                     decode_req.kv_receiver.failure_exception()
                 except Exception as e:
