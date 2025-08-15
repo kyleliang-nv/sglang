@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 concurrent_requests = 0
 concurrent_requests_lock = asyncio.Lock()
 
-# Global counter for tracking remaining unsent requests
+# Global counter for tracking remaining requests to send
 remaining_unsent_requests = 0
 remaining_unsent_requests_lock = asyncio.Lock()
 
@@ -73,6 +73,14 @@ async def decrement_concurrent_requests():
         return concurrent_requests
 
 
+async def decrement_remaining_unsent_requests():
+    """Decrement the remaining requests to send count and return the new count."""
+    global remaining_unsent_requests
+    async with remaining_unsent_requests_lock:
+        remaining_unsent_requests = max(0, remaining_unsent_requests - 1)
+        return remaining_unsent_requests
+
+
 def get_concurrent_requests():
     """Get the current concurrent request count (thread-safe)."""
     global concurrent_requests
@@ -80,13 +88,13 @@ def get_concurrent_requests():
 
 
 def get_remaining_unsent_requests():
-    """Get the current remaining unsent requests count (thread-safe)."""
+    """Get the current remaining requests to send count (thread-safe)."""
     global remaining_unsent_requests
     return remaining_unsent_requests
 
 
 def set_remaining_unsent_requests(count: int):
-    """Set the remaining unsent requests count (thread-safe)."""
+    """Set the remaining requests to send count (thread-safe)."""
     global remaining_unsent_requests
     remaining_unsent_requests = count
 
@@ -201,6 +209,9 @@ async def async_request_trt_llm(
             most_recent_timestamp = st
             try:
                 async with session.post(url=api_url, json=payload) as response:
+                    # Decrement remaining unsent count after request is actually sent
+                    await decrement_remaining_unsent_requests()
+
                     if response.status == 200:
                         async for chunk_bytes in response.content:
                             chunk_bytes = chunk_bytes.strip()
@@ -234,7 +245,7 @@ async def async_request_trt_llm(
                         total_time = time.time() - request_start_time
                         remaining_unsent = get_remaining_unsent_requests()
                         logger.info(
-                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {output.latency:.3f}s - Generated: {output.output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {output.latency:.3f}s - Generated: {output.output_len} tokens - TTFT: {ttft:.3f}s - Remaining to send: {remaining_unsent}"
                         )
 
                     else:
@@ -255,7 +266,7 @@ async def async_request_trt_llm(
         concurrent_count = await decrement_concurrent_requests()
         remaining_unsent = get_remaining_unsent_requests()
         logger.info(
-            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining to send: {remaining_unsent}"
         )
 
     if pbar:
@@ -308,6 +319,9 @@ async def async_request_openai_completions(
                 async with session.post(
                     url=api_url, json=payload, headers=headers
                 ) as response:
+                    # Decrement remaining unsent count after request is actually sent
+                    await decrement_remaining_unsent_requests()
+
                     if response.status == 200:
                         async for chunk_bytes in response.content:
                             chunk_bytes = chunk_bytes.strip()
@@ -355,7 +369,7 @@ async def async_request_openai_completions(
                         total_time = time.time() - request_start_time
                         remaining_unsent = get_remaining_unsent_requests()
                         logger.info(
-                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining to send: {remaining_unsent}"
                         )
 
                     else:
@@ -376,7 +390,7 @@ async def async_request_openai_completions(
         concurrent_count = await decrement_concurrent_requests()
         remaining_unsent = get_remaining_unsent_requests()
         logger.info(
-            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining to send: {remaining_unsent}"
         )
 
     if pbar:
@@ -455,6 +469,9 @@ async def async_request_openai_chat_completions(
                 async with session.post(
                     url=api_url, json=payload, headers=headers
                 ) as response:
+                    # Decrement remaining unsent count after request is actually sent
+                    await decrement_remaining_unsent_requests()
+
                     if response.status == 200:
                         if args.disable_stream:
                             # Non-streaming response
@@ -475,7 +492,7 @@ async def async_request_openai_chat_completions(
                             total_time = time.time() - request_start_time
                             remaining_unsent = get_remaining_unsent_requests()
                             logger.info(
-                                f"✅ Request {id(request_func_input)} completed successfully (non-streaming) - Total time: {total_time:.3f}s - Latency: {output.latency:.3f}s - Generated: {output.output_len} tokens - Remaining unsent: {remaining_unsent}"
+                                f"✅ Request {id(request_func_input)} completed successfully (non-streaming) - Total time: {total_time:.3f}s - Latency: {output.latency:.3f}s - Generated: {output.output_len} tokens - TTFT: {ttft:.3f}s - Remaining to send: {remaining_unsent}"
                             )
 
                         else:
@@ -533,7 +550,7 @@ async def async_request_openai_chat_completions(
                             total_time = time.time() - request_start_time
                             remaining_unsent = get_remaining_unsent_requests()
                             logger.info(
-                                f"✅ Request {id(request_func_input)} completed successfully (streaming) - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                                f"✅ Request {id(request_func_input)} completed successfully (streaming) - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining to send: {remaining_unsent}"
                             )
 
                     else:
@@ -601,6 +618,9 @@ async def async_request_truss(
                 async with session.post(
                     url=api_url, json=payload, headers=headers
                 ) as response:
+                    # Decrement remaining unsent count after request is actually sent
+                    await decrement_remaining_unsent_requests()
+
                     if response.status == 200:
                         async for chunk_bytes in response.content:
                             chunk_bytes = chunk_bytes.strip()
@@ -645,7 +665,7 @@ async def async_request_truss(
                         total_time = time.time() - request_start_time
                         remaining_unsent = get_remaining_unsent_requests()
                         logger.info(
-                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {request_func_input.output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {request_func_input.output_len} tokens - TTFT: {ttft:.3f}s - Remaining to send: {remaining_unsent}"
                         )
 
                     else:
@@ -666,7 +686,7 @@ async def async_request_truss(
         concurrent_count = await decrement_concurrent_requests()
         remaining_unsent = get_remaining_unsent_requests()
         logger.info(
-            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining to send: {remaining_unsent}"
         )
 
     if pbar:
@@ -686,7 +706,7 @@ async def async_request_sglang_generate(
     request_start_time = time.time()
     remaining_unsent = get_remaining_unsent_requests()
     logger.info(
-        f"🚀 Sending SGLang request to {api_url} - Request ID: {id(request_func_input)} - Prompt length: {request_func_input.prompt_len} tokens - Expected output: {request_func_input.output_len} tokens - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+        f"🚀 Sending SGLang request to {api_url} - Request ID: {id(request_func_input)} - Prompt length: {request_func_input.prompt_len} tokens - Expected output: {request_func_input.output_len} tokens - Concurrent requests: {concurrent_count} - Remaining to send: {remaining_unsent}"
     )
 
     try:
@@ -723,6 +743,9 @@ async def async_request_sglang_generate(
                 async with session.post(
                     url=api_url, json=payload, headers=headers
                 ) as response:
+                    # Decrement remaining unsent count after request is actually sent
+                    await decrement_remaining_unsent_requests()
+
                     if response.status == 200:
                         async for chunk_bytes in response.content:
                             chunk_bytes = chunk_bytes.strip()
@@ -774,7 +797,7 @@ async def async_request_sglang_generate(
                         total_time = time.time() - request_start_time
                         remaining_unsent = get_remaining_unsent_requests()
                         logger.info(
-                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining unsent: {remaining_unsent}"
+                            f"✅ Request {id(request_func_input)} completed successfully - Total time: {total_time:.3f}s - Latency: {latency:.3f}s - Generated: {output_len} tokens - TTFT: {ttft:.3f}s - Remaining to send: {remaining_unsent}"
                         )
 
                     else:
@@ -796,7 +819,7 @@ async def async_request_sglang_generate(
         concurrent_count = await decrement_concurrent_requests()
         remaining_unsent = get_remaining_unsent_requests()
         logger.info(
-            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+            f"🔚 Request {id(request_func_input)} finished - Concurrent requests: {concurrent_count} - Remaining to send: {remaining_unsent}"
         )
 
     if pbar:
@@ -817,7 +840,7 @@ async def async_request_profile(api_url: str) -> RequestFuncOutput:
     request_start_time = time.time()
     remaining_unsent = get_remaining_unsent_requests()
     logger.info(
-        f"🚀 Sending profile request to {api_url} - Request ID: {id(api_url)} - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+        f"🚀 Sending profile request to {api_url} - Request ID: {id(api_url)} - Concurrent requests: {concurrent_count} - Remaining to send: {remaining_unsent}"
     )
 
     try:
@@ -825,6 +848,9 @@ async def async_request_profile(api_url: str) -> RequestFuncOutput:
             output = RequestFuncOutput()
             try:
                 async with session.post(url=api_url) as response:
+                    # Decrement remaining unsent count after request is actually sent
+                    await decrement_remaining_unsent_requests()
+
                     if response.status == 200:
                         output.success = True
                         total_time = time.time() - request_start_time
@@ -849,7 +875,7 @@ async def async_request_profile(api_url: str) -> RequestFuncOutput:
         concurrent_count = await decrement_concurrent_requests()
         remaining_unsent = get_remaining_unsent_requests()
         logger.info(
-            f"🔚 Profile request {id(api_url)} finished - Concurrent requests: {concurrent_count} - Remaining unsent: {remaining_unsent}"
+            f"🔚 Profile request {id(api_url)} finished - Concurrent requests: {concurrent_count} - Remaining to send: {remaining_unsent}"
         )
 
     return output
@@ -1695,18 +1721,22 @@ async def benchmark(
 
     # Add periodic concurrent request count logging
     async def log_concurrent_status():
-        """Periodically log the current concurrent request count and remaining unsent requests."""
+        """Periodically log the current concurrent request count and remaining requests to send."""
         while len(tasks) < len(input_requests):
             await asyncio.sleep(5)  # Log every 5 seconds
             current_concurrent = get_concurrent_requests()
             remaining_unsent = get_remaining_unsent_requests()
             if current_concurrent > 0 or remaining_unsent > 0:
                 logger.info(
-                    f"📊 Current concurrent requests: {current_concurrent}, Remaining unsent: {remaining_unsent}"
+                    f"📊 Current concurrent requests: {current_concurrent}, Remaining to send: {remaining_unsent}"
                 )
 
     # Start the concurrent status logging task
     status_logger_task = asyncio.create_task(log_concurrent_status())
+
+    # Initialize remaining requests to send count to total requests
+    set_remaining_unsent_requests(len(input_requests))
+    logger.info(f"🚀 Starting benchmark with {len(input_requests)} requests to send")
 
     async for request in get_request(input_requests, request_rate):
         if lora_names is not None and len(lora_names) != 0:
@@ -1731,8 +1761,7 @@ async def benchmark(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
             )
         )
-        # Update remaining unsent requests count
-        set_remaining_unsent_requests(len(input_requests) - len(tasks))
+        # Remove the old logic - remaining unsent is now decremented when requests are actually sent
 
     # Cancel the status logger task since we're done creating tasks
     status_logger_task.cancel()
@@ -1768,7 +1797,7 @@ async def benchmark(
     benchmark_duration = time.perf_counter() - benchmark_start_time
     logger.info(f"📈 Benchmark completed in {benchmark_duration:.2f} seconds")
 
-    # Log final concurrent request count and remaining unsent requests
+    # Log final concurrent request count and remaining requests to send
     final_concurrent = get_concurrent_requests()
     final_remaining = get_remaining_unsent_requests()
     if final_concurrent > 0:
@@ -1781,7 +1810,7 @@ async def benchmark(
         )
 
     if final_remaining > 0:
-        logger.info(f"📋 Remaining unsent requests: {final_remaining}")
+        logger.info(f"📋 Remaining requests to send: {final_remaining}")
 
     metrics, output_lens = calculate_metrics(
         input_requests=input_requests,
@@ -1909,7 +1938,7 @@ async def benchmark(
     logger.info(f"   • Duration: {benchmark_duration:.2f}s")
     logger.info(f"   • Request throughput: {metrics.request_throughput:.2f} req/s")
     logger.info(f"   • Final concurrent requests: {get_concurrent_requests()}")
-    logger.info(f"   • Remaining unsent requests: {get_remaining_unsent_requests()}")
+    logger.info(f"   • Remaining requests to send: {get_remaining_unsent_requests()}")
     logger.info(
         f"   • Max concurrency limit: {max_concurrency if max_concurrency else 'unlimited'}"
     )
