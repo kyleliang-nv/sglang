@@ -987,11 +987,8 @@ class DecodeTransferQueue:
                     )
                     self.tree_cache.cache_finished_req(decode_req.req)
 
-                    # Log immediate completion
-                    total_duration = time.time() - decode_req.prealloc_entry_time
-                    logger.info(
-                        f"Request {decode_req.req.rid} completed immediately (max_new_tokens=1) in {total_duration:.3f}s"
-                    )
+                    # Log comprehensive completion summary for immediate completion
+                    self.scheduler.log_request_completion_summary(decode_req.req)
                 else:
                     transferred_reqs.append(decode_req.req)
                     logger.info(
@@ -1223,9 +1220,26 @@ class SchedulerDisaggregationDecodeMixin:
             if i < num_not_used_batch:
                 can_run_list.append(req)
                 req.init_next_round_input(self.tree_cache)
-                logger.info(
-                    f"Request {req.rid} started running (batch position {len(can_run_list)})"
-                )
+
+                # Set running entry time for tracking (only if req is valid)
+                if req and hasattr(req, "rid"):
+                    req.running_entry_time = time.time()
+
+                    # Calculate time spent in waiting queue
+                    waiting_duration = None
+                    if hasattr(req, "waiting_entry_time") and req.waiting_entry_time:
+                        waiting_duration = (
+                            req.running_entry_time - req.waiting_entry_time
+                        )
+                        logger.info(
+                            f"🚀 Request {req.rid} started running (batch position {len(can_run_list)}) after {waiting_duration:.3f}s in waiting queue"
+                        )
+                    else:
+                        logger.info(
+                            f"🚀 Request {req.rid} started running (batch position {len(can_run_list)}) (no waiting timing available)"
+                        )
+                else:
+                    logger.warning(f"Invalid request object in can_run_list: {req}")
             else:
                 waiting_queue.append(req)
 
@@ -1275,18 +1289,121 @@ class SchedulerDisaggregationDecodeMixin:
         )  # the requests which kv has arrived
         self.waiting_queue.extend(alloc_reqs)
 
-        # Log waiting queue status
+        # Log waiting queue status and set entry times
         if alloc_reqs:
+            for req in alloc_reqs:
+                # Set waiting entry time for tracking (only if req is valid)
+                if req and hasattr(req, "rid"):
+                    req.waiting_entry_time = time.time()
+
+                    # Calculate total time from prealloc to waiting
+                    total_time_to_waiting = None
+                    if hasattr(req, "prealloc_entry_time") and req.prealloc_entry_time:
+                        total_time_to_waiting = (
+                            req.waiting_entry_time - req.prealloc_entry_time
+                        )
+                        logger.info(
+                            f"⏳ Request {req.rid} entered waiting queue after {total_time_to_waiting:.3f}s total time"
+                        )
+                    else:
+                        logger.info(
+                            f"⏳ Request {req.rid} entered waiting queue (no prealloc timing available)"
+                        )
+                else:
+                    logger.warning(f"Invalid request object in alloc_reqs: {req}")
+
             logger.info(
                 f"Added {len(alloc_reqs)} requests to waiting queue (total: {len(self.waiting_queue)})"
             )
+
+    def log_request_completion_summary(self: "Scheduler", req: Req):
+        """Log a complete summary of a request's lifecycle when it finishes."""
+        if not req.is_finished():
+            return
+
+        # Calculate timing for each stage
+        timing_info = {}
+
+        if hasattr(req, "prealloc_entry_time") and req.prealloc_entry_time:
+            timing_info["prealloc_entry"] = req.prealloc_entry_time
+
+        if hasattr(req, "transfer_entry_time") and req.transfer_entry_time:
+            timing_info["transfer_entry"] = req.transfer_entry_time
+
+        if hasattr(req, "waiting_entry_time") and req.waiting_entry_time:
+            timing_info["waiting_entry"] = req.waiting_entry_time
+
+        if hasattr(req, "running_entry_time") and req.running_entry_time:
+            timing_info["running_entry"] = req.running_entry_time
+
+        completion_time = time.time()
+        timing_info["completion"] = completion_time
+
+        # Calculate durations for each stage
+        stage_durations = {}
+        if "prealloc_entry" in timing_info:
+            if "transfer_entry" in timing_info:
+                stage_durations["prealloc"] = (
+                    timing_info["transfer_entry"] - timing_info["prealloc_entry"]
+                )
+            if "waiting_entry" in timing_info:
+                stage_durations["transfer"] = (
+                    timing_info["waiting_entry"] - timing_info["transfer_entry"]
+                )
+            if "running_entry" in timing_info:
+                stage_durations["waiting"] = (
+                    timing_info["running_entry"] - timing_info["waiting_entry"]
+                )
+                stage_durations["running"] = (
+                    timing_info["completion"] - timing_info["running_entry"]
+                )
+
+        # Calculate total time
+        total_duration = None
+        if "prealloc_entry" in timing_info:
+            total_duration = completion_time - timing_info["prealloc_entry"]
+
+        # Log the complete lifecycle summary
+        logger.info(f"🎯 REQUEST {req.rid} COMPLETION SUMMARY:")
+
+        if total_duration is not None:
+            logger.info(f"   • Total time: {total_duration:.3f}s")
+        else:
+            logger.info(f"   • Total time: Unknown (incomplete timing data)")
+
+        if stage_durations:
+            logger.info(f"   • Stage breakdown:")
+            for stage, duration in stage_durations.items():
+                if duration is not None:
+                    logger.info(f"     - {stage.capitalize()}: {duration:.3f}s")
+                else:
+                    logger.info(f"     - {stage.capitalize()}: Unknown")
+        else:
+            logger.info(f"   • Stage breakdown: Insufficient timing data")
+
+        # Log output information
+        if hasattr(req, "output_ids") and req.output_ids:
+            output_len = len(req.output_ids)
+            logger.info(f"   • Generated {output_len} tokens successfully")
+
+            # Calculate throughput
+            if total_duration and total_duration > 0:
+                tokens_per_second = output_len / total_duration
+                logger.info(f"   • Throughput: {tokens_per_second:.2f} tokens/second")
+            else:
+                logger.info(f"   • Throughput: Unknown (insufficient timing data)")
+        else:
+            logger.warning(f"   • ⚠️ No output tokens generated")
+
+        logger.info(f"   • Request {req.rid} lifecycle complete")
 
     def process_batch_result(self: "Scheduler", batch: ScheduleBatch, result):
         """Process batch results and track request completion."""
         # Track completion for requests in the batch
         for req in batch.reqs:
             if req.is_finished():
-                logger.info(f"Request {req.rid} completed decode processing")
+                # Log comprehensive completion summary
+                self.log_request_completion_summary(req)
 
         # Call the original process_batch_result logic
         if hasattr(super(), "process_batch_result"):
@@ -1300,7 +1417,8 @@ class SchedulerDisaggregationDecodeMixin:
         # Track completion for finished requests
         for req in reqs:
             if req.is_finished():
-                logger.info(f"Request {req.rid} output streamed, request completed")
+                # Log comprehensive completion summary
+                self.log_request_completion_summary(req)
 
         # Call the original stream_output logic
         if hasattr(super(), "stream_output"):
