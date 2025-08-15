@@ -1,11 +1,18 @@
 """
 Minimal HTTP load balancer for prefill and decode servers for testing.
+
+Features:
+- Request completion tracking with timing information
+- Detailed logging for debugging request flow
+- Support for both streaming and non-streaming responses
+- Health checks and server registration
 """
 
 import asyncio
 import dataclasses
 import logging
 import random
+import time
 import urllib
 from itertools import chain
 from typing import List, Optional
@@ -151,6 +158,7 @@ class MiniLoadBalancer:
     async def generate(
         self, modified_request, prefill_server, decode_server, endpoint
     ) -> ORJSONResponse:
+        request_start_time = time.time()
         logger.info(f"Starting non-streaming generation via {endpoint}")
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
@@ -176,7 +184,10 @@ class MiniLoadBalancer:
                         f"Both responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
                     )
             except Exception as e:
-                logger.error(f"Error during parallel requests: {e}")
+                request_duration = time.time() - request_start_time
+                logger.error(
+                    f"Error during parallel requests after {request_duration:.3f}s: {e}"
+                )
                 raise
 
             if "return_logprob" in modified_request:
@@ -195,7 +206,10 @@ class MiniLoadBalancer:
             else:
                 ret_json = await decode_response.json()
 
-            logger.info(f"Generation completed successfully via {endpoint}")
+            request_duration = time.time() - request_start_time
+            logger.info(
+                f"Generation completed successfully via {endpoint} in {request_duration:.3f}s"
+            )
             return ORJSONResponse(
                 content=ret_json,
                 status_code=decode_response.status,
@@ -204,74 +218,89 @@ class MiniLoadBalancer:
     async def generate_stream(
         self, modified_request, prefill_server, decode_server, endpoint="generate"
     ):
+        request_start_time = time.time()
         logger.info(f"Starting streaming generation via {endpoint}")
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
         async def stream_results():
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(
-                    total=3600
-                )  # Add timeout for request reliability
-            ) as session:
-                if ENABLE_DEBUG_LOGGING:
-                    logger.debug(
-                        f"Sending streaming requests to prefill: {prefill_server}/{endpoint}, decode: {decode_server}/{endpoint}"
-                    )
-                # Create the tasks for both prefill and decode requests
-                tasks = [
-                    session.post(f"{prefill_server}/{endpoint}", json=modified_request),
-                    session.post(f"{decode_server}/{endpoint}", json=modified_request),
-                ]
-                # Wait for both responses to complete. Since this is streaming, they return immediately.
-                try:
-                    prefill_response, decode_response = await asyncio.gather(*tasks)
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(
+                        total=3600
+                    )  # Add timeout for request reliability
+                ) as session:
                     if ENABLE_DEBUG_LOGGING:
                         logger.debug(
-                            f"Streaming responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
+                            f"Sending streaming requests to prefill: {prefill_server}/{endpoint}, decode: {decode_server}/{endpoint}"
                         )
-                except Exception as e:
-                    logger.error(f"Error during streaming parallel requests: {e}")
-                    raise
-
-                if modified_request.get("return_logprob", False):
-                    if ENABLE_DEBUG_LOGGING:
-                        logger.debug("Processing streaming logprob merge")
-                    prefill_chunks = []
-                    async for chunk in prefill_response.content:
-                        prefill_chunks.append(chunk)
-
-                    first_prefill_chunk = (
-                        prefill_chunks[0].decode("utf-8")[5:].strip("\n")
-                    )
-                    first_prefill_chunk_json = orjson.loads(first_prefill_chunk)
-
-                    async for chunk in decode_response.content:
-                        # Note: This is inefficient
-                        # merge prefill input_token_logprobs, output_token_logprobs to decode
-                        decoded_chunk = chunk.decode("utf-8")
-                        if (
-                            decoded_chunk
-                            and decoded_chunk.startswith("data:")
-                            and "[DONE]" not in decoded_chunk
-                        ):
-                            ret_json = orjson.loads(decoded_chunk[5:].strip("\n"))
-                            ret_json["meta_info"]["input_token_logprobs"] = (
-                                first_prefill_chunk_json["meta_info"][
-                                    "input_token_logprobs"
-                                ]
-                                + ret_json["meta_info"]["input_token_logprobs"]
+                    # Create the tasks for both prefill and decode requests
+                    tasks = [
+                        session.post(
+                            f"{prefill_server}/{endpoint}", json=modified_request
+                        ),
+                        session.post(
+                            f"{decode_server}/{endpoint}", json=modified_request
+                        ),
+                    ]
+                    # Wait for both responses to complete. Since this is streaming, they return immediately.
+                    try:
+                        prefill_response, decode_response = await asyncio.gather(*tasks)
+                        if ENABLE_DEBUG_LOGGING:
+                            logger.debug(
+                                f"Streaming responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
                             )
+                    except Exception as e:
+                        request_duration = time.time() - request_start_time
+                        logger.error(
+                            f"Error during streaming parallel requests after {request_duration:.3f}s: {e}"
+                        )
+                        raise
 
-                            yield b"data: " + orjson.dumps(ret_json) + b"\n\n"
-                        else:
+                    if modified_request.get("return_logprob", False):
+                        if ENABLE_DEBUG_LOGGING:
+                            logger.debug("Processing streaming logprob merge")
+                        prefill_chunks = []
+                        async for chunk in prefill_response.content:
+                            prefill_chunks.append(chunk)
+
+                        first_prefill_chunk = (
+                            prefill_chunks[0].decode("utf-8")[5:].strip("\n")
+                        )
+                        first_prefill_chunk_json = orjson.loads(first_prefill_chunk)
+
+                        async for chunk in decode_response.content:
+                            # Note: This is inefficient
+                            # merge prefill input_token_logprobs, output_token_logprobs to decode
+                            decoded_chunk = chunk.decode("utf-8")
+                            if (
+                                decoded_chunk
+                                and decoded_chunk.startswith("data:")
+                                and "[DONE]" not in decoded_chunk
+                            ):
+                                ret_json = orjson.loads(decoded_chunk[5:].strip("\n"))
+                                ret_json["meta_info"]["input_token_logprobs"] = (
+                                    first_prefill_chunk_json["meta_info"][
+                                        "input_token_logprobs"
+                                    ]
+                                    + ret_json["meta_info"]["input_token_logprobs"]
+                                )
+
+                                yield b"data: " + orjson.dumps(ret_json) + b"\n\n"
+                            else:
+                                yield chunk
+                    else:
+                        if ENABLE_DEBUG_LOGGING:
+                            logger.debug("Streaming decode response without logprob")
+                        async for chunk in decode_response.content.iter_chunked(
+                            AIOHTTP_STREAM_READ_CHUNK_SIZE
+                        ):
                             yield chunk
-                else:
-                    if ENABLE_DEBUG_LOGGING:
-                        logger.debug("Streaming decode response without logprob")
-                    async for chunk in decode_response.content.iter_chunked(
-                        AIOHTTP_STREAM_READ_CHUNK_SIZE
-                    ):
-                        yield chunk
+            finally:
+                # Log completion when streaming ends
+                request_duration = time.time() - request_start_time
+                logger.info(
+                    f"Streaming generation completed via {endpoint} in {request_duration:.3f}s"
+                )
 
         logger.info(f"Streaming generation setup completed via {endpoint}")
         return StreamingResponse(
@@ -439,6 +468,7 @@ async def get_model_info():
 async def handle_generate_request(request_data: dict):
     global request_counter
     request_counter += 1
+    request_start_time = time.time()
 
     if ENABLE_REQUEST_LOGGING:
         logger.info(f"POST /generate request #{request_counter} received")
@@ -498,19 +528,32 @@ async def handle_generate_request(request_data: dict):
                 logger.info(
                     f"Returning streaming response for request #{request_counter}"
                 )
-            return await load_balancer.generate_stream(
+            response = await load_balancer.generate_stream(
                 modified_request, prefill_server, decode_server, "generate"
             )
+            request_duration = time.time() - request_start_time
+            logger.info(
+                f"Request #{request_counter} streaming response returned in {request_duration:.3f}s"
+            )
+            return response
         else:
             if ENABLE_REQUEST_LOGGING:
                 logger.info(
                     f"Returning non-streaming response for request #{request_counter}"
                 )
-            return await load_balancer.generate(
+            response = await load_balancer.generate(
                 modified_request, prefill_server, decode_server, "generate"
             )
+            request_duration = time.time() - request_start_time
+            logger.info(
+                f"Request #{request_counter} non-streaming response returned in {request_duration:.3f}s"
+            )
+            return response
     except Exception as e:
-        logger.error(f"Error in handle_generate_request #{request_counter}: {e}")
+        request_duration = time.time() - request_start_time
+        logger.error(
+            f"Error in handle_generate_request #{request_counter} after {request_duration:.3f}s: {e}"
+        )
         if ENABLE_REQUEST_LOGGING:
             logger.error(f"Request data that caused error: {request_data}")
         raise
@@ -519,6 +562,7 @@ async def handle_generate_request(request_data: dict):
 async def _forward_to_backend(request_data: dict, endpoint_name: str):
     global request_counter
     request_counter += 1
+    request_start_time = time.time()
 
     if ENABLE_REQUEST_LOGGING:
         logger.info(f"POST /{endpoint_name} request #{request_counter} received")
@@ -561,26 +605,37 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
                 logger.info(
                     f"Returning streaming response for {endpoint_name} request #{request_counter}"
                 )
-            return await load_balancer.generate_stream(
+            response = await load_balancer.generate_stream(
                 modified_request,
                 prefill_server,
                 decode_server,
                 endpoint=endpoint_name,
             )
+            request_duration = time.time() - request_start_time
+            logger.info(
+                f"Request #{request_counter} {endpoint_name} streaming response returned in {request_duration:.3f}s"
+            )
+            return response
         else:
             if ENABLE_REQUEST_LOGGING:
                 logger.info(
                     f"Returning non-streaming response for {endpoint_name} request #{request_counter}"
                 )
-            return await load_balancer.generate(
+            response = await load_balancer.generate(
                 modified_request,
                 prefill_server,
                 decode_server,
                 endpoint=endpoint_name,
             )
+            request_duration = time.time() - request_start_time
+            logger.info(
+                f"Request #{request_counter} {endpoint_name} non-streaming response returned in {request_duration:.3f}s"
+            )
+            return response
     except Exception as e:
+        request_duration = time.time() - request_start_time
         logger.error(
-            f"Error in _forward_to_backend for {endpoint_name} request #{request_counter}: {e}"
+            f"Error in _forward_to_backend for {endpoint_name} request #{request_counter} after {request_duration:.3f}s: {e}"
         )
         if ENABLE_REQUEST_LOGGING:
             logger.error(f"Request data that caused error: {request_data}")
