@@ -73,6 +73,9 @@ CLIP_MAX_NEW_TOKEN = get_int_env_var("SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION", 40
 DEFAULT_BOOTSTRAP_BATCH_SIZE = 8
 DEFAULT_BOOTSTRAP_TIMEOUT = 30.0  # seconds
 DEFAULT_MAX_CONCURRENT_BOOTSTRAPS = 16
+DEFAULT_STATUS_LOG_INTERVAL = (
+    10.0  # seconds - controls how often queue status is logged
+)
 
 
 class DecodeReqToTokenPool:
@@ -286,6 +289,7 @@ class DecodePreallocQueue:
         prefill_pp_size: int,
         num_reserved_decode_tokens: int,
         transfer_backend: TransferBackend,
+        status_log_interval: Optional[float] = None,
     ):
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
@@ -329,6 +333,17 @@ class DecodePreallocQueue:
                 "SGLANG_DECODE_BOOTSTRAP_TIMEOUT", int(DEFAULT_BOOTSTRAP_TIMEOUT)
             )
         )
+
+        # Status logging interval
+        if status_log_interval is not None:
+            self.status_log_interval = status_log_interval
+        else:
+            self.status_log_interval = float(
+                get_int_env_var(
+                    "SGLANG_DECODE_STATUS_LOG_INTERVAL",
+                    int(DEFAULT_STATUS_LOG_INTERVAL),
+                )
+            )
 
         # Start async event loop for bootstrap operations
         self._start_async_loop()
@@ -835,7 +850,18 @@ class DecodePreallocQueue:
             "bootstrap_manager_stats": self.bootstrap_manager.get_connection_pool_stats(),
             "bootstrap_batch_size": self.bootstrap_batch_size,
             "bootstrap_timeout": self.bootstrap_timeout,
+            "status_log_interval": self.status_log_interval,
         }
+
+    def set_status_log_interval(self, interval: float) -> None:
+        """Set the status log interval for queue status logging."""
+        if interval <= 0:
+            logger.warning(f"Invalid status log interval: {interval}, must be positive")
+            return
+
+        old_interval = self.status_log_interval
+        self.status_log_interval = interval
+        logger.info(f"Status log interval changed from {old_interval}s to {interval}s")
 
     def shutdown(self):
         """Shutdown the queue and cleanup resources."""
@@ -1001,7 +1027,8 @@ class SchedulerDisaggregationDecodeMixin:
         """A normal scheduler loop for decode worker in disaggregation mode."""
 
         last_status_log_time = time.time()
-        status_log_interval = 10.0  # Log status every 10 seconds
+        # Get status log interval from prealloc queue
+        status_log_interval = self.disagg_decode_prealloc_queue.status_log_interval
 
         while True:
             recv_reqs = self.recv_requests()
@@ -1053,7 +1080,8 @@ class SchedulerDisaggregationDecodeMixin:
         self.last_batch_in_queue = False  # last batch is modified in-place, so we need another variable to track if it's extend
 
         last_status_log_time = time.time()
-        status_log_interval = 10.0  # Log status every 10 seconds
+        # Get status log interval from prealloc queue
+        status_log_interval = self.disagg_decode_prealloc_queue.status_log_interval
 
         while True:
             recv_reqs = self.recv_requests()
@@ -1300,6 +1328,7 @@ class SchedulerDisaggregationDecodeMixin:
                 + (self.running_batch.batch_size() if self.running_batch else 0)
                 + len(self.disagg_decode_prealloc_queue.retracted_queue)
             ),
+            "status_log_interval": self.get_status_log_interval(),
         }
 
     def log_queue_status(self: "Scheduler"):
@@ -1406,3 +1435,11 @@ class SchedulerDisaggregationDecodeMixin:
                 if len(requests) > 5:
                     logger.info(f"  ... and {len(requests) - 5} more requests")
         logger.info("=== End Request Status ===")
+
+    def set_status_log_interval(self: "Scheduler", interval: float) -> None:
+        """Set the status log interval for queue status logging."""
+        self.disagg_decode_prealloc_queue.set_status_log_interval(interval)
+
+    def get_status_log_interval(self: "Scheduler") -> float:
+        """Get the current status log interval."""
+        return self.disagg_decode_prealloc_queue.status_log_interval
