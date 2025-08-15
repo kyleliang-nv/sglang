@@ -1221,17 +1221,25 @@ class SchedulerDisaggregationDecodeMixin:
                 can_run_list.append(req)
                 req.init_next_round_input(self.tree_cache)
 
-                # Set running entry time for tracking
-                req.running_entry_time = time.time()
+                # Set running entry time for tracking (only if req is valid)
+                if req and hasattr(req, "rid"):
+                    req.running_entry_time = time.time()
 
-                # Calculate time spent in waiting queue
-                waiting_duration = None
-                if hasattr(req, "waiting_entry_time") and req.waiting_entry_time:
-                    waiting_duration = req.running_entry_time - req.waiting_entry_time
-
-                logger.info(
-                    f"🚀 Request {req.rid} started running (batch position {len(can_run_list)}) after {waiting_duration:.3f}s in waiting queue"
-                )
+                    # Calculate time spent in waiting queue
+                    waiting_duration = None
+                    if hasattr(req, "waiting_entry_time") and req.waiting_entry_time:
+                        waiting_duration = (
+                            req.running_entry_time - req.waiting_entry_time
+                        )
+                        logger.info(
+                            f"🚀 Request {req.rid} started running (batch position {len(can_run_list)}) after {waiting_duration:.3f}s in waiting queue"
+                        )
+                    else:
+                        logger.info(
+                            f"🚀 Request {req.rid} started running (batch position {len(can_run_list)}) (no waiting timing available)"
+                        )
+                else:
+                    logger.warning(f"Invalid request object in can_run_list: {req}")
             else:
                 waiting_queue.append(req)
 
@@ -1284,19 +1292,25 @@ class SchedulerDisaggregationDecodeMixin:
         # Log waiting queue status and set entry times
         if alloc_reqs:
             for req in alloc_reqs:
-                # Set waiting entry time for tracking
-                req.waiting_entry_time = time.time()
+                # Set waiting entry time for tracking (only if req is valid)
+                if req and hasattr(req, "rid"):
+                    req.waiting_entry_time = time.time()
 
-                # Calculate total time from prealloc to waiting
-                total_time_to_waiting = None
-                if hasattr(req, "prealloc_entry_time") and req.prealloc_entry_time:
-                    total_time_to_waiting = (
-                        req.waiting_entry_time - req.prealloc_entry_time
-                    )
-
-                logger.info(
-                    f"⏳ Request {req.rid} entered waiting queue after {total_time_to_waiting:.3f}s total time"
-                )
+                    # Calculate total time from prealloc to waiting
+                    total_time_to_waiting = None
+                    if hasattr(req, "prealloc_entry_time") and req.prealloc_entry_time:
+                        total_time_to_waiting = (
+                            req.waiting_entry_time - req.prealloc_entry_time
+                        )
+                        logger.info(
+                            f"⏳ Request {req.rid} entered waiting queue after {total_time_to_waiting:.3f}s total time"
+                        )
+                    else:
+                        logger.info(
+                            f"⏳ Request {req.rid} entered waiting queue (no prealloc timing available)"
+                        )
+                else:
+                    logger.warning(f"Invalid request object in alloc_reqs: {req}")
 
             logger.info(
                 f"Added {len(alloc_reqs)} requests to waiting queue (total: {len(self.waiting_queue)})"
@@ -1345,18 +1359,27 @@ class SchedulerDisaggregationDecodeMixin:
                 )
 
         # Calculate total time
-        total_duration = completion_time - timing_info.get(
-            "prealloc_entry", completion_time
-        )
+        total_duration = None
+        if "prealloc_entry" in timing_info:
+            total_duration = completion_time - timing_info["prealloc_entry"]
 
         # Log the complete lifecycle summary
         logger.info(f"🎯 REQUEST {req.rid} COMPLETION SUMMARY:")
-        logger.info(f"   • Total time: {total_duration:.3f}s")
+
+        if total_duration is not None:
+            logger.info(f"   • Total time: {total_duration:.3f}s")
+        else:
+            logger.info(f"   • Total time: Unknown (incomplete timing data)")
 
         if stage_durations:
             logger.info(f"   • Stage breakdown:")
             for stage, duration in stage_durations.items():
-                logger.info(f"     - {stage.capitalize()}: {duration:.3f}s")
+                if duration is not None:
+                    logger.info(f"     - {stage.capitalize()}: {duration:.3f}s")
+                else:
+                    logger.info(f"     - {stage.capitalize()}: Unknown")
+        else:
+            logger.info(f"   • Stage breakdown: Insufficient timing data")
 
         # Log output information
         if hasattr(req, "output_ids") and req.output_ids:
@@ -1364,9 +1387,11 @@ class SchedulerDisaggregationDecodeMixin:
             logger.info(f"   • Generated {output_len} tokens successfully")
 
             # Calculate throughput
-            if total_duration > 0:
+            if total_duration and total_duration > 0:
                 tokens_per_second = output_len / total_duration
                 logger.info(f"   • Throughput: {tokens_per_second:.2f} tokens/second")
+            else:
+                logger.info(f"   • Throughput: Unknown (insufficient timing data)")
         else:
             logger.warning(f"   • ⚠️ No output tokens generated")
 
