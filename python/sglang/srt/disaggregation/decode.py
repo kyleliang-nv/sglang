@@ -16,6 +16,12 @@ Life cycle of a request in the decode server
 
 4. RunningBatch:
     a. Merge the resolved PrebuiltExtendBatch into running batch to run decoding
+
+Request Flow Logging:
+- Track request entry into each queue
+- Monitor queue transitions
+- Log timing for each stage
+- Track request completion
 """
 
 from __future__ import annotations
@@ -140,6 +146,13 @@ class DecodeRequest:
     bootstrap_retry_count: int = 0
     max_bootstrap_retries: int = 3
 
+    # Request tracking fields
+    prealloc_entry_time: Optional[float] = None
+    transfer_entry_time: Optional[float] = None
+    waiting_entry_time: Optional[float] = None
+    running_entry_time: Optional[float] = None
+    completion_time: Optional[float] = None
+
 
 class ParallelBootstrapManager:
     """Manages parallel bootstrap operations for multiple requests."""
@@ -199,13 +212,19 @@ class ParallelBootstrapManager:
             decode_req.kv_receiver = kv_receiver
         else:
             # Create new connection
-            kv_receiver = decode_req.kv_receiver
+            kv_receiver = decode_req.req.kv_receiver
 
         # Perform bootstrap handshake
         await self._handshake_async(kv_receiver, decode_req)
 
         # Mark as ready for input
         decode_req.waiting_for_input = True
+
+        # Log bootstrap completion
+        bootstrap_duration = time.time() - decode_req.bootstrap_start_time
+        logger.info(
+            f"Request {decode_req.req.rid} bootstrap completed in {bootstrap_duration:.3f}s"
+        )
 
     async def _handshake_async(
         self, kv_receiver: BaseKVReceiver, decode_req: DecodeRequest
@@ -406,6 +425,7 @@ class DecodePreallocQueue:
 
         if is_retracted:
             self.retracted_queue.append(req)
+            logger.info(f"Request {req.rid} added to retracted queue")
         else:
             if req.bootstrap_host == FAKE_BOOTSTRAP_HOST:
                 kv_receiver_class = get_kv_class(
@@ -427,11 +447,21 @@ class DecodePreallocQueue:
                 req=req, kv_receiver=kv_receiver, waiting_for_input=False
             )
 
+            # Set prealloc entry time
+            decode_req.prealloc_entry_time = time.time()
+            logger.info(
+                f"Request {req.rid} entered prealloc queue at {decode_req.prealloc_entry_time:.3f}s"
+            )
+
             self.queue.append(decode_req)
 
             # Start parallel bootstrap if not fake
             if req.bootstrap_host != FAKE_BOOTSTRAP_HOST:
+                logger.info(f"Starting bootstrap for request {req.rid}")
                 self._schedule_bootstrap(decode_req)
+            else:
+                logger.info(f"Request {req.rid} using fake bootstrap, marked as ready")
+                decode_req.waiting_for_input = True
 
     def _schedule_bootstrap(self, decode_req: DecodeRequest):
         """Schedule bootstrap operation asynchronously."""
@@ -667,6 +697,16 @@ class DecodePreallocQueue:
                 kv_indices, self.token_to_kv_pool_allocator.page_size
             )
             decode_req.kv_receiver.init(page_indices, decode_req.metadata_buffer_index)
+
+            # Log transition to transfer queue
+            decode_req.transfer_entry_time = time.time()
+            prealloc_duration = (
+                decode_req.transfer_entry_time - decode_req.prealloc_entry_time
+            )
+            logger.info(
+                f"Request {decode_req.req.rid} moved to transfer queue after {prealloc_duration:.3f}s in prealloc"
+            )
+
             preallocated_reqs.append(decode_req)
             indices_to_remove.add(i)
 
@@ -832,9 +872,14 @@ class DecodeTransferQueue:
 
     def add(self, decode_req: DecodeRequest) -> None:
         self.queue.append(decode_req)
+        logger.info(f"Request {decode_req.req.rid} entered transfer queue")
 
     def extend(self, decode_reqs: List[DecodeRequest]) -> None:
         self.queue.extend(decode_reqs)
+        for decode_req in decode_reqs:
+            logger.info(
+                f"Request {decode_req.req.rid} entered transfer queue (via extend)"
+            )
 
     def pop_transferred(self) -> List[Req]:
         if not self.queue:
@@ -901,6 +946,12 @@ class DecodeTransferQueue:
                 if hasattr(decode_req.kv_receiver, "clear"):
                     decode_req.kv_receiver.clear()
 
+                # Log successful KV transfer
+                transfer_duration = time.time() - decode_req.transfer_entry_time
+                logger.info(
+                    f"Request {decode_req.req.rid} KV transfer completed in {transfer_duration:.3f}s"
+                )
+
                 # special handling for sampling_params.max_new_tokens == 1
                 if decode_req.req.sampling_params.max_new_tokens == 1:
                     # finish immediately
@@ -909,8 +960,17 @@ class DecodeTransferQueue:
                         [decode_req.req], decode_req.req.return_logprob
                     )
                     self.tree_cache.cache_finished_req(decode_req.req)
+
+                    # Log immediate completion
+                    total_duration = time.time() - decode_req.prealloc_entry_time
+                    logger.info(
+                        f"Request {decode_req.req.rid} completed immediately (max_new_tokens=1) in {total_duration:.3f}s"
+                    )
                 else:
                     transferred_reqs.append(decode_req.req)
+                    logger.info(
+                        f"Request {decode_req.req.rid} moved to waiting queue after successful KV transfer"
+                    )
 
                 indices_to_remove.add(i)
             elif poll in [
@@ -939,6 +999,9 @@ class SchedulerDisaggregationDecodeMixin:
     @torch.no_grad()
     def event_loop_normal_disagg_decode(self: "Scheduler"):
         """A normal scheduler loop for decode worker in disaggregation mode."""
+
+        last_status_log_time = time.time()
+        status_log_interval = 10.0  # Log status every 10 seconds
 
         while True:
             recv_reqs = self.recv_requests()
@@ -975,6 +1038,12 @@ class SchedulerDisaggregationDecodeMixin:
             ):
                 self.self_check_during_idle()
 
+            # Periodic queue status logging
+            current_time = time.time()
+            if current_time - last_status_log_time > status_log_interval:
+                self.log_queue_status()
+                last_status_log_time = current_time
+
             self.last_batch = batch
 
     @torch.no_grad()
@@ -982,6 +1051,9 @@ class SchedulerDisaggregationDecodeMixin:
         result_queue = deque()
         self.last_batch: Optional[ScheduleBatch] = None
         self.last_batch_in_queue = False  # last batch is modified in-place, so we need another variable to track if it's extend
+
+        last_status_log_time = time.time()
+        status_log_interval = 10.0  # Log status every 10 seconds
 
         while True:
             recv_reqs = self.recv_requests()
@@ -1048,6 +1120,12 @@ class SchedulerDisaggregationDecodeMixin:
                 == 0
             ):
                 self.self_check_during_idle()
+
+            # Periodic queue status logging
+            current_time = time.time()
+            if current_time - last_status_log_time > status_log_interval:
+                self.log_queue_status()
+                last_status_log_time = current_time
 
             self.last_batch = batch
             self.last_batch_in_queue = last_batch_in_queue
@@ -1117,6 +1195,9 @@ class SchedulerDisaggregationDecodeMixin:
             if i < num_not_used_batch:
                 can_run_list.append(req)
                 req.init_next_round_input(self.tree_cache)
+                logger.info(
+                    f"Request {req.rid} started running (batch position {len(can_run_list)})"
+                )
             else:
                 waiting_queue.append(req)
 
@@ -1140,12 +1221,21 @@ class SchedulerDisaggregationDecodeMixin:
         new_batch.prepare_for_prebuilt_extend()
         new_batch.process_prebuilt_extend(self.server_args, self.model_config)
 
+        logger.info(
+            f"Created new batch with {len(can_run_list)} requests for decode processing"
+        )
+
         return new_batch
 
     def process_decode_queue(self: "Scheduler"):
         # try to resume retracted requests if there are enough space for another `num_reserved_decode_tokens` decode steps
         resumed_reqs = self.disagg_decode_prealloc_queue.resume_retracted_reqs()
         self.waiting_queue.extend(resumed_reqs)
+        for req in resumed_reqs:
+            logger.info(
+                f"Request {req.rid} resumed from retracted queue to waiting queue"
+            )
+
         if len(self.disagg_decode_prealloc_queue.retracted_queue) > 0:
             # if there are still retracted requests, we do not allocate new requests
             return
@@ -1156,3 +1246,163 @@ class SchedulerDisaggregationDecodeMixin:
             self.disagg_decode_transfer_queue.pop_transferred()
         )  # the requests which kv has arrived
         self.waiting_queue.extend(alloc_reqs)
+
+        # Log waiting queue status
+        if alloc_reqs:
+            logger.info(
+                f"Added {len(alloc_reqs)} requests to waiting queue (total: {len(self.waiting_queue)})"
+            )
+
+    def process_batch_result(self: "Scheduler", batch: ScheduleBatch, result):
+        """Process batch results and track request completion."""
+        # Track completion for requests in the batch
+        for req in batch.reqs:
+            if req.is_finished():
+                logger.info(f"Request {req.rid} completed decode processing")
+
+        # Call the original process_batch_result logic
+        if hasattr(super(), "process_batch_result"):
+            super().process_batch_result(batch, result)
+        else:
+            # Fallback if no parent method
+            pass
+
+    def stream_output(self: "Scheduler", reqs: List[Req], return_logprob: bool):
+        """Stream output and track request completion."""
+        # Track completion for finished requests
+        for req in reqs:
+            if req.is_finished():
+                logger.info(f"Request {req.rid} output streamed, request completed")
+
+        # Call the original stream_output logic
+        if hasattr(super(), "stream_output"):
+            super().stream_output(reqs, return_logprob)
+        else:
+            # Fallback if no parent method
+            pass
+
+    def get_queue_stats(self: "Scheduler") -> Dict[str, any]:
+        """Get statistics about all queues for monitoring."""
+        return {
+            "prealloc_queue_size": len(self.disagg_decode_prealloc_queue.queue),
+            "transfer_queue_size": len(self.disagg_decode_transfer_queue.queue),
+            "waiting_queue_size": len(self.waiting_queue),
+            "running_batch_size": (
+                self.running_batch.batch_size() if self.running_batch else 0
+            ),
+            "retracted_queue_size": len(
+                self.disagg_decode_prealloc_queue.retracted_queue
+            ),
+            "total_requests_in_system": (
+                len(self.disagg_decode_prealloc_queue.queue)
+                + len(self.disagg_decode_transfer_queue.queue)
+                + len(self.waiting_queue)
+                + (self.running_batch.batch_size() if self.running_batch else 0)
+                + len(self.disagg_decode_prealloc_queue.retracted_queue)
+            ),
+        }
+
+    def log_queue_status(self: "Scheduler"):
+        """Log current queue status for debugging."""
+        stats = self.get_queue_stats()
+        logger.info(
+            f"Queue Status - Prealloc: {stats['prealloc_queue_size']}, "
+            f"Transfer: {stats['transfer_queue_size']}, "
+            f"Waiting: {stats['waiting_queue_size']}, "
+            f"Running: {stats['running_batch_size']}, "
+            f"Retracted: {stats['retracted_queue_size']}, "
+            f"Total: {stats['total_requests_in_system']}"
+        )
+
+    def get_request_tracking_info(self: "Scheduler") -> Dict[str, any]:
+        """Get detailed request tracking information for debugging."""
+        tracking_info = {
+            "prealloc_queue": [],
+            "transfer_queue": [],
+            "waiting_queue": [],
+            "running_batch": [],
+            "retracted_queue": [],
+        }
+
+        # Prealloc queue requests
+        for decode_req in self.disagg_decode_prealloc_queue.queue:
+            tracking_info["prealloc_queue"].append(
+                {
+                    "rid": decode_req.req.rid,
+                    "waiting_for_input": decode_req.waiting_for_input,
+                    "bootstrap_start_time": decode_req.bootstrap_start_time,
+                    "bootstrap_retry_count": decode_req.bootstrap_retry_count,
+                    "prealloc_entry_time": decode_req.prealloc_entry_time,
+                    "time_in_prealloc": (
+                        time.time() - decode_req.prealloc_entry_time
+                        if decode_req.prealloc_entry_time
+                        else None
+                    ),
+                }
+            )
+
+        # Transfer queue requests
+        for decode_req in self.disagg_decode_transfer_queue.queue:
+            tracking_info["transfer_queue"].append(
+                {
+                    "rid": decode_req.req.rid,
+                    "transfer_entry_time": decode_req.transfer_entry_time,
+                    "time_in_transfer": (
+                        time.time() - decode_req.transfer_entry_time
+                        if decode_req.transfer_entry_time
+                        else None
+                    ),
+                }
+            )
+
+        # Waiting queue requests
+        for req in self.waiting_queue:
+            tracking_info["waiting_queue"].append(
+                {
+                    "rid": req.rid,
+                    "waiting_entry_time": getattr(req, "waiting_entry_time", None),
+                    "time_in_waiting": (
+                        time.time() - getattr(req, "waiting_entry_time", time.time())
+                        if hasattr(req, "waiting_entry_time") and req.waiting_entry_time
+                        else None
+                    ),
+                }
+            )
+
+        # Running batch requests
+        if self.running_batch and self.running_batch.reqs:
+            for req in self.running_batch.reqs:
+                tracking_info["running_batch"].append(
+                    {
+                        "rid": req.rid,
+                        "running_entry_time": getattr(req, "running_entry_time", None),
+                        "time_in_running": (
+                            time.time()
+                            - getattr(req, "running_entry_time", time.time())
+                            if hasattr(req, "running_entry_time")
+                            and req.running_entry_time
+                            else None
+                        ),
+                    }
+                )
+
+        # Retracted queue requests
+        for req in self.disagg_decode_prealloc_queue.retracted_queue:
+            tracking_info["retracted_queue"].append(
+                {"rid": req.rid, "is_retracted": req.is_retracted}
+            )
+
+        return tracking_info
+
+    def log_detailed_request_status(self: "Scheduler"):
+        """Log detailed request status for debugging."""
+        tracking_info = self.get_request_tracking_info()
+        logger.info("=== Detailed Request Status ===")
+        for queue_name, requests in tracking_info.items():
+            if requests:
+                logger.info(f"{queue_name.upper()} ({len(requests)} requests):")
+                for req_info in requests[:5]:  # Log first 5 requests to avoid spam
+                    logger.info(f"  Request {req_info['rid']}: {req_info}")
+                if len(requests) > 5:
+                    logger.info(f"  ... and {len(requests) - 5} more requests")
+        logger.info("=== End Request Status ===")
