@@ -15,7 +15,7 @@ import random
 import time
 import urllib
 from itertools import chain
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import aiohttp
 import orjson
@@ -111,7 +111,130 @@ request_counter = 0
 # Global flags for conditional logging
 ENABLE_REQUEST_LOGGING = True
 ENABLE_DEBUG_LOGGING = False
+
+# Global streaming request tracking
+streaming_requests: Dict[int, Dict[str, any]] = {}
+streaming_requests_lock = asyncio.Lock()
+
 logger = setup_logger()  # Initialize with defaults
+
+
+async def track_streaming_request_start(
+    request_id: int, request_data: dict, prefill_server: str, decode_server: str
+):
+    """Track when a streaming request starts."""
+    async with streaming_requests_lock:
+        streaming_requests[request_id] = {
+            "start_time": time.time(),
+            "request_data": request_data,
+            "prefill_server": prefill_server,
+            "decode_server": decode_server,
+            "streaming_started": False,
+            "streaming_completed": False,
+            "completion_time": None,
+            "total_duration": None,
+        }
+        logger.info(
+            f"🚀 Streaming request #{request_id} tracking started - prefill: {prefill_server}, decode: {decode_server}"
+        )
+
+
+async def track_streaming_started(request_id: int):
+    """Track when streaming actually begins."""
+    async with streaming_requests_lock:
+        if request_id in streaming_requests:
+            streaming_requests[request_id]["streaming_started"] = True
+            streaming_start_time = time.time()
+            time_to_streaming = (
+                streaming_start_time - streaming_requests[request_id]["start_time"]
+            )
+            logger.info(
+                f"📡 Streaming request #{request_id} started streaming after {time_to_streaming:.3f}s"
+            )
+
+
+async def track_streaming_completion(request_id: int):
+    """Track when streaming completes."""
+    async with streaming_requests_lock:
+        if request_id in streaming_requests:
+            completion_time = time.time()
+            streaming_requests[request_id]["streaming_completed"] = True
+            streaming_requests[request_id]["completion_time"] = completion_time
+            streaming_requests[request_id]["total_duration"] = (
+                completion_time - streaming_requests[request_id]["start_time"]
+            )
+
+            total_duration = streaming_requests[request_id]["total_duration"]
+            logger.info(
+                f"✅ Streaming request #{request_id} completed in {total_duration:.3f}s"
+            )
+
+            # Clean up completed request tracking
+            del streaming_requests[request_id]
+
+
+def get_streaming_stats() -> Dict[str, any]:
+    """Get statistics about streaming requests."""
+    with asyncio.Lock():
+        active_streaming = len(streaming_requests)
+        completed_requests = []
+
+        for req_id, req_info in streaming_requests.items():
+            if req_info["streaming_completed"]:
+                completed_requests.append(
+                    {
+                        "request_id": req_id,
+                        "total_duration": req_info["total_duration"],
+                        "prefill_server": req_info["prefill_server"],
+                        "decode_server": req_info["decode_server"],
+                    }
+                )
+
+        return {
+            "active_streaming_requests": active_streaming,
+            "completed_streaming_requests": len(completed_requests),
+            "streaming_requests_details": list(streaming_requests.keys()),
+        }
+
+
+async def clear_completed_streaming_requests():
+    """Clear completed streaming requests from tracking."""
+    async with streaming_requests_lock:
+        completed_ids = [
+            req_id
+            for req_id, req_info in streaming_requests.items()
+            if req_info["streaming_completed"]
+        ]
+
+        for req_id in completed_ids:
+            del streaming_requests[req_id]
+
+        if completed_ids:
+            logger.info(
+                f"Cleared {len(completed_ids)} completed streaming requests from tracking"
+            )
+
+        return len(completed_ids)
+
+
+def get_streaming_request_details(request_id: int) -> Optional[Dict[str, any]]:
+    """Get detailed information about a specific streaming request."""
+    if request_id in streaming_requests:
+        req_info = streaming_requests[request_id].copy()
+        current_time = time.time()
+
+        # Add calculated fields
+        if req_info["start_time"]:
+            req_info["age"] = current_time - req_info["start_time"]
+
+        if req_info["streaming_started"] and req_info["start_time"]:
+            req_info["time_to_streaming"] = (
+                req_info.get("streaming_start_time", 0) - req_info["start_time"]
+            )
+
+        return req_info
+
+    return None
 
 
 @dataclasses.dataclass
@@ -141,6 +264,10 @@ class MiniLoadBalancer:
         logger.info(
             f"Added decode server: {new_decode_server} (total: {len(self.decode_servers)})"
         )
+
+    def get_streaming_stats(self) -> Dict[str, any]:
+        """Get streaming request statistics."""
+        return get_streaming_stats()
 
     def select_pair(self):
         # TODO: return some message instead of panic
@@ -216,11 +343,22 @@ class MiniLoadBalancer:
             )
 
     async def generate_stream(
-        self, modified_request, prefill_server, decode_server, endpoint="generate"
+        self,
+        modified_request,
+        prefill_server,
+        decode_server,
+        endpoint="generate",
+        request_id: Optional[int] = None,
     ):
         request_start_time = time.time()
         logger.info(f"Starting streaming generation via {endpoint}")
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
+
+        # Track streaming request if ID provided
+        if request_id is not None:
+            await track_streaming_request_start(
+                request_id, modified_request, prefill_server, decode_server
+            )
 
         async def stream_results():
             try:
@@ -249,6 +387,11 @@ class MiniLoadBalancer:
                             logger.debug(
                                 f"Streaming responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
                             )
+
+                        # Track when streaming actually starts
+                        if request_id is not None:
+                            await track_streaming_started(request_id)
+
                     except Exception as e:
                         request_duration = time.time() - request_start_time
                         logger.error(
@@ -301,6 +444,10 @@ class MiniLoadBalancer:
                 logger.info(
                     f"Streaming generation completed via {endpoint} in {request_duration:.3f}s"
                 )
+
+                # Track streaming completion
+                if request_id is not None:
+                    await track_streaming_completion(request_id)
 
         logger.info(f"Streaming generation setup completed via {endpoint}")
         return StreamingResponse(
@@ -451,6 +598,67 @@ async def get_server_info():
         }
 
 
+@app.get("/get_streaming_stats")
+async def get_streaming_stats():
+    """Get statistics about streaming requests."""
+    logger.debug("Get streaming stats endpoint called")
+
+    stats = get_streaming_stats()
+    logger.info(f"Streaming stats: {stats}")
+
+    return {"streaming_stats": stats, "timestamp": time.time()}
+
+
+@app.post("/clear_streaming_requests")
+async def clear_streaming_requests():
+    """Clear completed streaming requests from tracking."""
+    logger.debug("Clear streaming requests endpoint called")
+
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for clear streaming requests")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
+    try:
+        cleared_count = await clear_completed_streaming_requests()
+        logger.info(f"Cleared {cleared_count} completed streaming requests")
+
+        return {"cleared_count": cleared_count, "timestamp": time.time()}
+    except Exception as e:
+        logger.error(f"Failed to clear streaming requests: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/get_streaming_request/{request_id}")
+async def get_streaming_request_details(request_id: int):
+    """Get detailed information about a specific streaming request."""
+    logger.debug(f"Get streaming request details for request #{request_id}")
+
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for get streaming request details")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
+    try:
+        request_details = get_streaming_request_details(request_id)
+
+        if request_details is None:
+            raise HTTPException(
+                status_code=404, detail=f"Streaming request #{request_id} not found"
+            )
+
+        logger.info(f"Retrieved details for streaming request #{request_id}")
+
+        return {
+            "request_id": request_id,
+            "details": request_details,
+            "timestamp": time.time(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get streaming request details for #{request_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/get_model_info")
 async def get_model_info():
     logger.debug("Get model info endpoint called")
@@ -529,7 +737,11 @@ async def handle_generate_request(request_data: dict):
                     f"Returning streaming response for request #{request_counter}"
                 )
             response = await load_balancer.generate_stream(
-                modified_request, prefill_server, decode_server, "generate"
+                modified_request,
+                prefill_server,
+                decode_server,
+                "generate",
+                request_id=request_counter,
             )
             request_duration = time.time() - request_start_time
             logger.info(
@@ -610,6 +822,7 @@ async def _forward_to_backend(request_data: dict, endpoint_name: str):
                 prefill_server,
                 decode_server,
                 endpoint=endpoint_name,
+                request_id=request_counter,
             )
             request_duration = time.time() - request_start_time
             logger.info(
