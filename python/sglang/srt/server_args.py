@@ -67,6 +67,11 @@ class ServerArgs:
     warmups: Optional[str] = None
     nccl_port: Optional[int] = None
 
+    # Process separation options
+    use_separated_processes: bool = False
+    tokenizer_ipc_port: Optional[int] = None
+    http_ipc_port: Optional[int] = None
+
     # Quantization and data type
     dtype: str = "auto"
     quantization: Optional[str] = None
@@ -817,6 +822,23 @@ class ServerArgs:
             type=int,
             default=ServerArgs.nccl_port,
             help="The port for NCCL distributed environment setup. Defaults to a random port.",
+        )
+
+        # Process separation options
+        parser.add_argument(
+            "--use-separated-processes",
+            action="store_true",
+            help="Enable separated processes for tokenizer and HTTP server.",
+        )
+        parser.add_argument(
+            "--tokenizer-ipc-port",
+            type=int,
+            help="Port for tokenizer IPC communication. Only used if --use-separated-processes is True.",
+        )
+        parser.add_argument(
+            "--http-ipc-port",
+            type=int,
+            help="Port for HTTP IPC communication. Only used if --use-separated-processes is True.",
         )
 
         # Quantization and data type
