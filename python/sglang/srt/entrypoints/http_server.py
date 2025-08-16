@@ -973,10 +973,150 @@ def _create_error_response(e):
     )
 
 
+def find_available_port(start_port: int, end_port: int) -> int:
+    """Find an available port in the given range"""
+    import socket
+
+    for port in range(start_port, end_port):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("localhost", port))
+                return port
+        except OSError:
+            continue
+
+    raise RuntimeError(f"No available ports in range {start_port}-{end_port}")
+
+
+def launch_server_separated(
+    server_args: ServerArgs,
+    pipe_finish_writer: Optional[multiprocessing.connection.Connection] = None,
+    launch_callback: Optional[Callable[[], None]] = None,
+):
+    """
+    Launch SRT Server with separated HTTP and TokenizerManager processes.
+    Supports all disaggregation modes including PD-disaggregation.
+    """
+
+    # Import here to avoid circular imports
+    from sglang.srt.disaggregation.utils import DisaggregationMode
+    from sglang.srt.entrypoints.http_server_process import run_http_server_process
+    from sglang.srt.entrypoints.tokenizer_manager_process import (
+        run_tokenizer_manager_process,
+    )
+
+    # Check disaggregation mode
+    disaggregation_mode = DisaggregationMode(server_args.disaggregation_mode)
+    logger.info(f"Launching separated process server in {disaggregation_mode} mode")
+
+    # Find available ports for IPC
+    tokenizer_ipc_port = find_available_port(31000, 32000)
+    http_ipc_port = find_available_port(32000, 33000)
+
+    logger.info(
+        f"Using IPC ports - TokenizerManager: {tokenizer_ipc_port}, HTTP Server: {http_ipc_port}"
+    )
+
+    # Create pipes for communication
+    tokenizer_reader, tokenizer_writer = multiprocessing.Pipe(duplex=False)
+    http_reader, http_writer = multiprocessing.Pipe(duplex=False)
+
+    # Launch TokenizerManager process
+    logger.info(f"Starting TokenizerManager process in {disaggregation_mode} mode...")
+    tokenizer_proc = multiprocessing.Process(
+        target=run_tokenizer_manager_process,
+        args=(server_args, tokenizer_ipc_port, tokenizer_writer),
+    )
+    tokenizer_proc.start()
+
+    # Wait for TokenizerManager to be ready
+    try:
+        tokenizer_status = tokenizer_reader.recv()
+        if tokenizer_status.get("status") != "ready":
+            raise RuntimeError(f"TokenizerManager failed to start: {tokenizer_status}")
+
+        actual_mode = tokenizer_status.get("mode", "unknown")
+        logger.info(
+            f"TokenizerManager process started successfully in {actual_mode} mode"
+        )
+
+        # Verify mode consistency
+        if actual_mode != str(disaggregation_mode):
+            logger.warning(
+                f"Mode mismatch: expected {disaggregation_mode}, got {actual_mode}"
+            )
+
+    except Exception as e:
+        logger.error(f"Failed to start TokenizerManager: {e}")
+        tokenizer_proc.terminate()
+        raise
+
+    # Launch HTTP server process
+    logger.info(f"Starting HTTP server process...")
+    http_proc = multiprocessing.Process(
+        target=run_http_server_process,
+        args=(server_args, f"localhost:{tokenizer_ipc_port}", http_writer),
+    )
+    http_proc.start()
+
+    # Wait for HTTP server to be ready
+    try:
+        http_status = http_reader.recv()
+        if http_status.get("status") != "ready":
+            raise RuntimeError(f"HTTP server failed to start: {http_status}")
+
+        http_mode = http_status.get("mode", "unknown")
+        logger.info(
+            f"HTTP server process started successfully, connected to TokenizerManager in {http_mode} mode"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to start HTTP server: {e}")
+        http_proc.terminate()
+        tokenizer_proc.terminate()
+        raise
+
+    # Store process references for cleanup
+    processes = [tokenizer_proc, http_proc]
+
+    # Set up signal handlers for cleanup
+    import signal
+
+    def cleanup_handler(signum, frame):
+        logger.info("Received signal, cleaning up processes...")
+        for proc in processes:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+        if pipe_finish_writer:
+            pipe_finish_writer.send("cleanup_complete")
+
+    signal.signal(signal.SIGINT, cleanup_handler)
+    signal.signal(signal.SIGTERM, cleanup_handler)
+
+    # Log final status
+    logger.info(
+        f"Separated process server launched successfully in {disaggregation_mode} mode"
+    )
+    logger.info(
+        f"Processes: TokenizerManager (PID: {tokenizer_proc.pid}), HTTP Server (PID: {http_proc.pid})"
+    )
+
+    # Wait for processes to complete
+    try:
+        for proc in processes:
+            proc.join()
+    except KeyboardInterrupt:
+        cleanup_handler(signal.SIGINT, None)
+
+
 def launch_server(
     server_args: ServerArgs,
     pipe_finish_writer: Optional[multiprocessing.connection.Connection] = None,
     launch_callback: Optional[Callable[[], None]] = None,
+    use_separated_processes: bool = False,
 ):
     """
     Launch SRT (SGLang Runtime) Server.
@@ -992,6 +1132,25 @@ def launch_server(
     Note:
     1. The HTTP server, Engine, and TokenizerManager both run in the main process.
     2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
+
+    Args:
+        use_separated_processes: If True, run HTTP and TokenizerManager in separate processes
+    """
+
+    if use_separated_processes:
+        return launch_server_separated(server_args, pipe_finish_writer, launch_callback)
+    else:
+        # Original implementation
+        return launch_server_original(server_args, pipe_finish_writer, launch_callback)
+
+
+def launch_server_original(
+    server_args: ServerArgs,
+    pipe_finish_writer: Optional[multiprocessing.connection.Connection] = None,
+    launch_callback: Optional[Callable[[], None]] = None,
+):
+    """
+    Original launch_server implementation - kept for backward compatibility.
     """
     tokenizer_manager, template_manager, scheduler_info = _launch_subprocesses(
         server_args=server_args
