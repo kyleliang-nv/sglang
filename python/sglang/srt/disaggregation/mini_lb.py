@@ -272,9 +272,6 @@ class MiniLoadBalancer:
                         limit_per_host=int(
                             os.getenv("PDLB_CONNECTION_LIMIT_PER_HOST", "20")
                         ),  # Connections per host
-                        ttl_dns_cache=int(
-                            os.getenv("PDLB_DNS_CACHE_TTL", "300")
-                        ),  # DNS cache TTL
                         use_dns_cache=True,
                         keepalive_timeout=int(
                             os.getenv("PDLB_KEEPALIVE_TIMEOUT", "30")
@@ -288,7 +285,7 @@ class MiniLoadBalancer:
                     logger.info(
                         f"Created new aiohttp session with connection pooling: "
                         f"limit={connector.limit}, limit_per_host={connector.limit_per_host}, "
-                        f"dns_cache_ttl={connector.ttl_dns_cache}, keepalive_timeout={connector.keepalive_timeout}"
+                        f"keepalive_timeout={connector.keepalive_timeout}"
                     )
         return self.session
 
