@@ -1230,15 +1230,22 @@ class ModelRunner:
             if self.server_args.disaggregation_mode == "decode":
                 from sglang.srt.disaggregation.decode import DecodeReqToTokenPool
 
-                # subscribe memory for pre-allocated requests
-                # if max_num_reqs <= 32, we pre-allocate 2x requests
-                pre_alloc_size = max_num_reqs * 2 if max_num_reqs <= 32 else 0
+                # Use max_decode_server_requests if specified, otherwise fall back to max_running_requests
+                total_decode_requests = (
+                    self.server_args.max_decode_server_requests
+                    if self.server_args.max_decode_server_requests is not None
+                    else max_num_reqs
+                )
+
+                # With total_request_limit, we don't need the old pre_alloc logic
+                # The DecodeReqToTokenPool will handle the total limit directly
                 self.req_to_token_pool = DecodeReqToTokenPool(
-                    size=max_num_reqs,
+                    size=max_num_reqs,  # This controls running requests
                     max_context_len=self.model_config.context_len + 4,
                     device=self.device,
                     enable_memory_saver=self.server_args.enable_memory_saver,
-                    pre_alloc_size=pre_alloc_size,
+                    pre_alloc_size=0,  # Not used when total_request_limit is set
+                    total_request_limit=total_decode_requests,  # This controls total requests on server
                 )
             else:
                 self.req_to_token_pool = ReqToTokenPool(
