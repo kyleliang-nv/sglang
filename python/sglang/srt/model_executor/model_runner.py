@@ -1237,17 +1237,14 @@ class ModelRunner:
                     else max_num_reqs
                 )
 
-                # subscribe memory for pre-allocated requests
-                # if total_decode_requests <= 32, we pre-allocate 2x requests
-                pre_alloc_size = (
-                    total_decode_requests * 2 if total_decode_requests <= 32 else 0
-                )
+                # With total_request_limit, we don't need the old pre_alloc logic
+                # The DecodeReqToTokenPool will handle the total limit directly
                 self.req_to_token_pool = DecodeReqToTokenPool(
                     size=max_num_reqs,  # This controls running requests
                     max_context_len=self.model_config.context_len + 4,
                     device=self.device,
                     enable_memory_saver=self.server_args.enable_memory_saver,
-                    pre_alloc_size=pre_alloc_size,
+                    pre_alloc_size=0,  # Not used when total_request_limit is set
                     total_request_limit=total_decode_requests,  # This controls total requests on server
                 )
             else:

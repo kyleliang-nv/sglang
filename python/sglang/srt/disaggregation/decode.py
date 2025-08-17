@@ -92,6 +92,9 @@ class DecodeReqToTokenPool:
     The total_request_limit parameter controls the maximum number of requests that can be on the decode server
     across all phases (prealloc, transfer, waiting, running), while the size parameter controls only the
     maximum number of running requests.
+
+    When total_request_limit is set, the pre_alloc_size parameter is ignored and the pool_size is set directly
+    to total_request_limit for more efficient memory management.
     """
 
     def __init__(
@@ -119,7 +122,14 @@ class DecodeReqToTokenPool:
         if total_request_limit is not None:
             self.pool_size = total_request_limit
         else:
+            # Fallback to old logic for backward compatibility
             self.pool_size = size + pre_alloc_size
+
+        logger.info(
+            f"DecodeReqToTokenPool initialized: size={size} (running requests), "
+            f"pre_alloc_size={pre_alloc_size}, total_request_limit={total_request_limit}, "
+            f"pool_size={self.pool_size}"
+        )
 
         with memory_saver_adapter.region(tag=GPU_MEMORY_TYPE_KV_CACHE):
             self.req_to_token = torch.zeros(
