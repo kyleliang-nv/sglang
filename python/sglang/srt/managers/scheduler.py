@@ -1380,17 +1380,33 @@ class Scheduler(
             raise ValueError(msg)
 
         if self.disaggregation_mode == DisaggregationMode.DECODE:
-            req_total_size = (
-                self.req_to_token_pool.size + self.req_to_token_pool.pre_alloc_size
-            )
+            # For DecodeReqToTokenPool, use the pool_size which accounts for total_request_limit
+            if hasattr(self.req_to_token_pool, "pool_size"):
+                req_total_size = self.req_to_token_pool.pool_size
+            else:
+                req_total_size = (
+                    self.req_to_token_pool.size + self.req_to_token_pool.pre_alloc_size
+                )
         else:
             req_total_size = self.req_to_token_pool.size
 
         if len(self.req_to_token_pool.free_slots) != req_total_size:
+            # Add debug info for decode mode
+            debug_info = ""
+            if self.disaggregation_mode == DisaggregationMode.DECODE and hasattr(
+                self.req_to_token_pool, "pool_size"
+            ):
+                debug_info = (
+                    f"\nDebug info: size={self.req_to_token_pool.size}, "
+                    f"pre_alloc_size={self.req_to_token_pool.pre_alloc_size}, "
+                    f"pool_size={self.req_to_token_pool.pool_size}, "
+                    f"total_request_limit={getattr(self.req_to_token_pool, 'total_request_limit', 'None')}"
+                )
+
             msg = (
                 "req_to_token_pool memory leak detected!"
                 f"available_size={len(self.req_to_token_pool.free_slots)}, "
-                f"total_size={self.req_to_token_pool.size}\n"
+                f"total_size={req_total_size}{debug_info}\n"
             )
             raise ValueError(msg)
 
