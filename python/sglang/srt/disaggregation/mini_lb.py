@@ -11,6 +11,7 @@ Features:
 import asyncio
 import dataclasses
 import logging
+import os
 import random
 import time
 import urllib
@@ -248,9 +249,55 @@ class MiniLoadBalancer:
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
+
+        # Create a shared session with connection pooling
+        self.session = None
+        self.session_lock = asyncio.Lock()
+
         logger.info(
             f"MiniLoadBalancer initialized with {len(self.prefill_configs)} prefill servers and {len(self.decode_servers)} decode servers"
         )
+
+    async def get_session(self):
+        """Get or create a shared aiohttp session with proper connection limits."""
+        if self.session is None or self.session.closed:
+            async with self.session_lock:
+                if self.session is None or self.session.closed:
+                    # Configure connection pooling to prevent file descriptor exhaustion
+                    # Allow tuning via environment variables
+                    connector = aiohttp.TCPConnector(
+                        limit=int(
+                            os.getenv("PDLB_CONNECTION_LIMIT", "100")
+                        ),  # Total connection pool size
+                        limit_per_host=int(
+                            os.getenv("PDLB_CONNECTION_LIMIT_PER_HOST", "20")
+                        ),  # Connections per host
+                        ttl_dns_cache=int(
+                            os.getenv("PDLB_DNS_CACHE_TTL", "300")
+                        ),  # DNS cache TTL
+                        use_dns_cache=True,
+                        keepalive_timeout=int(
+                            os.getenv("PDLB_KEEPALIVE_TIMEOUT", "30")
+                        ),
+                        enable_cleanup_closed=True,
+                    )
+                    self.session = aiohttp.ClientSession(
+                        connector=connector,
+                        timeout=aiohttp.ClientTimeout(total=3600),
+                    )
+                    logger.info(
+                        f"Created new aiohttp session with connection pooling: "
+                        f"limit={connector.limit}, limit_per_host={connector.limit_per_host}, "
+                        f"dns_cache_ttl={connector.ttl_dns_cache}, keepalive_timeout={connector.keepalive_timeout}"
+                    )
+        return self.session
+
+    async def close_session(self):
+        """Close the shared session."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+            self.session = None
+            logger.info("Closed aiohttp session")
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
@@ -289,58 +336,54 @@ class MiniLoadBalancer:
         logger.info(f"Starting non-streaming generation via {endpoint}")
         assert endpoint[0] != "/", f"Endpoint should not start with '/': {endpoint}"
 
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(
-                total=3600
-            )  # Add timeout for request reliability
-        ) as session:
+        session = await self.get_session()
+        if ENABLE_DEBUG_LOGGING:
+            logger.debug(
+                f"Sending requests to prefill: {prefill_server}/{endpoint}, decode: {decode_server}/{endpoint}"
+            )
+        tasks = [
+            session.post(f"{prefill_server}/{endpoint}", json=modified_request),
+            session.post(f"{decode_server}/{endpoint}", json=modified_request),
+        ]
+
+        # Wait for both responses to complete. Prefill should end first.
+        try:
+            prefill_response, decode_response = await asyncio.gather(*tasks)
             if ENABLE_DEBUG_LOGGING:
                 logger.debug(
-                    f"Sending requests to prefill: {prefill_server}/{endpoint}, decode: {decode_server}/{endpoint}"
+                    f"Both responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
                 )
-            tasks = [
-                session.post(f"{prefill_server}/{endpoint}", json=modified_request),
-                session.post(f"{decode_server}/{endpoint}", json=modified_request),
-            ]
-
-            # Wait for both responses to complete. Prefill should end first.
-            try:
-                prefill_response, decode_response = await asyncio.gather(*tasks)
-                if ENABLE_DEBUG_LOGGING:
-                    logger.debug(
-                        f"Both responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
-                    )
-            except Exception as e:
-                request_duration = time.time() - request_start_time
-                logger.error(
-                    f"Error during parallel requests after {request_duration:.3f}s: {e}"
-                )
-                raise
-
-            if "return_logprob" in modified_request:
-                if ENABLE_DEBUG_LOGGING:
-                    logger.debug("Processing logprob merge")
-                prefill_json = await prefill_response.json()
-                ret_json = await decode_response.json()
-
-                # merge `meta_info.input_token_logprobs` from prefill to decode
-                if "meta_info" in ret_json:
-                    if "input_token_logprobs" in ret_json["meta_info"]:
-                        ret_json["meta_info"]["input_token_logprobs"] = (
-                            prefill_json["meta_info"]["input_token_logprobs"]
-                            + ret_json["meta_info"]["input_token_logprobs"]
-                        )
-            else:
-                ret_json = await decode_response.json()
-
+        except Exception as e:
             request_duration = time.time() - request_start_time
-            logger.info(
-                f"Generation completed successfully via {endpoint} in {request_duration:.3f}s"
+            logger.error(
+                f"Error during parallel requests after {request_duration:.3f}s: {e}"
             )
-            return ORJSONResponse(
-                content=ret_json,
-                status_code=decode_response.status,
-            )
+            raise
+
+        if "return_logprob" in modified_request:
+            if ENABLE_DEBUG_LOGGING:
+                logger.debug("Processing logprob merge")
+            prefill_json = await prefill_response.json()
+            ret_json = await decode_response.json()
+
+            # merge `meta_info.input_token_logprobs` from prefill to decode
+            if "meta_info" in ret_json:
+                if "input_token_logprobs" in ret_json["meta_info"]:
+                    ret_json["meta_info"]["input_token_logprobs"] = (
+                        prefill_json["meta_info"]["input_token_logprobs"]
+                        + ret_json["meta_info"]["input_token_logprobs"]
+                    )
+        else:
+            ret_json = await decode_response.json()
+
+        request_duration = time.time() - request_start_time
+        logger.info(
+            f"Generation completed successfully via {endpoint} in {request_duration:.3f}s"
+        )
+        return ORJSONResponse(
+            content=ret_json,
+            status_code=decode_response.status,
+        )
 
     async def generate_stream(
         self,
@@ -362,42 +405,34 @@ class MiniLoadBalancer:
 
         async def stream_results():
             try:
-                async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(
-                        total=3600
-                    )  # Add timeout for request reliability
-                ) as session:
+                session = await self.get_session()
+                if ENABLE_DEBUG_LOGGING:
+                    logger.debug(
+                        f"Sending streaming requests to prefill: {prefill_server}/{endpoint}, decode: {decode_server}/{endpoint}"
+                    )
+                # Create the tasks for both prefill and decode requests
+                tasks = [
+                    session.post(f"{prefill_server}/{endpoint}", json=modified_request),
+                    session.post(f"{decode_server}/{endpoint}", json=modified_request),
+                ]
+                # Wait for both responses to complete. Since this is streaming, they return immediately.
+                try:
+                    prefill_response, decode_response = await asyncio.gather(*tasks)
                     if ENABLE_DEBUG_LOGGING:
                         logger.debug(
-                            f"Sending streaming requests to prefill: {prefill_server}/{endpoint}, decode: {decode_server}/{endpoint}"
+                            f"Streaming responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
                         )
-                    # Create the tasks for both prefill and decode requests
-                    tasks = [
-                        session.post(
-                            f"{prefill_server}/{endpoint}", json=modified_request
-                        ),
-                        session.post(
-                            f"{decode_server}/{endpoint}", json=modified_request
-                        ),
-                    ]
-                    # Wait for both responses to complete. Since this is streaming, they return immediately.
-                    try:
-                        prefill_response, decode_response = await asyncio.gather(*tasks)
-                        if ENABLE_DEBUG_LOGGING:
-                            logger.debug(
-                                f"Streaming responses received - prefill: {prefill_response.status}, decode: {decode_response.status}"
-                            )
 
-                        # Track when streaming actually starts
-                        if request_id is not None:
-                            await track_streaming_started(request_id)
+                    # Track when streaming actually starts
+                    if request_id is not None:
+                        await track_streaming_started(request_id)
 
-                    except Exception as e:
-                        request_duration = time.time() - request_start_time
-                        logger.error(
-                            f"Error during streaming parallel requests after {request_duration:.3f}s: {e}"
-                        )
-                        raise
+                except Exception as e:
+                    request_duration = time.time() - request_start_time
+                    logger.error(
+                        f"Error during streaming parallel requests after {request_duration:.3f}s: {e}"
+                    )
+                    raise
 
                     if modified_request.get("return_logprob", False):
                         if ENABLE_DEBUG_LOGGING:
@@ -460,6 +495,14 @@ app = FastAPI()
 load_balancer: Optional[MiniLoadBalancer] = None
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources when the application shuts down."""
+    if load_balancer:
+        await load_balancer.close_session()
+        logger.info("Load balancer session closed during shutdown")
+
+
 @app.get("/health")
 async def health_check():
     logger.debug("Health check endpoint called")
@@ -481,19 +524,23 @@ async def health_check():
         f"Checking health of {len(prefill_servers)} prefill and {len(decode_servers)} decode servers"
     )
 
-    async with aiohttp.ClientSession() as session:
-        # Create the tasks
-        tasks = []
-        for server in chain(prefill_servers, decode_servers):
-            tasks.append(session.post(f"{server}/health_generate"))
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for health check")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
 
-        try:
-            for i, response in enumerate(asyncio.as_completed(tasks)):
-                await response
-            logger.info("All servers responded to health check")
-        except Exception as e:
-            logger.error(f"Health check failed: {e}")
-            raise HTTPException(status_code=500, detail=f"Health check failed: {e}")
+    session = await load_balancer.get_session()
+    # Create the tasks
+    tasks = []
+    for server in chain(prefill_servers, decode_servers):
+        tasks.append(session.post(f"{server}/health_generate"))
+
+    try:
+        for i, response in enumerate(asyncio.as_completed(tasks)):
+            await response
+        logger.info("All servers responded to health check")
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Health check failed: {e}")
 
     return Response(status_code=200)
 
@@ -513,19 +560,23 @@ async def flush_cache():
         f"Flushing cache on {len(prefill_servers)} prefill and {len(decode_servers)} decode servers"
     )
 
-    async with aiohttp.ClientSession() as session:
-        # Create the tasks
-        tasks = []
-        for server in chain(prefill_servers, decode_servers):
-            tasks.append(session.post(f"{server}/flush_cache"))
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for flush cache")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
 
-        try:
-            for i, response in enumerate(asyncio.as_completed(tasks)):
-                await response
-            logger.info("Cache flush completed for all servers")
-        except Exception as e:
-            logger.error(f"Cache flush failed: {e}")
-            raise HTTPException(status_code=500, detail=f"Cache flush failed: {e}")
+    session = await load_balancer.get_session()
+    # Create the tasks
+    tasks = []
+    for server in chain(prefill_servers, decode_servers):
+        tasks.append(session.post(f"{server}/flush_cache"))
+
+    try:
+        for i, response in enumerate(asyncio.as_completed(tasks)):
+            await response
+        logger.info("Cache flush completed for all servers")
+    except Exception as e:
+        logger.error(f"Cache flush failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Cache flush failed: {e}")
 
     return Response(status_code=200)
 
@@ -545,32 +596,34 @@ async def get_server_info():
     decode_infos = []
     all_internal_states = []
 
-    async with aiohttp.ClientSession() as session:
-        if ENABLE_DEBUG_LOGGING:
-            logger.debug(
-                f"Fetching server info from {len(prefill_servers)} prefill servers"
-            )
-        for server in chain(prefill_servers):
-            try:
-                server_info = await session.get(f"{server}/get_server_info")
-                prefill_infos.append(await server_info.json())
-            except Exception as e:
-                logger.error(f"Failed to get info from prefill server {server}: {e}")
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for get server info")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
 
-        if ENABLE_DEBUG_LOGGING:
-            logger.debug(
-                f"Fetching server info from {len(decode_servers)} decode servers"
-            )
-        for server in chain(decode_servers):
-            try:
-                server_info = await session.get(f"{server}/get_server_info")
-                info_json = await server_info.json()
-                decode_infos.append(info_json)
-                # Extract internal_states from decode servers
-                if "internal_states" in info_json:
-                    all_internal_states.extend(info_json["internal_states"])
-            except Exception as e:
-                logger.error(f"Failed to get info from decode server {server}: {e}")
+    session = await load_balancer.get_session()
+    if ENABLE_DEBUG_LOGGING:
+        logger.debug(
+            f"Fetching server info from {len(prefill_servers)} prefill servers"
+        )
+    for server in chain(prefill_servers):
+        try:
+            server_info = await session.get(f"{server}/get_server_info")
+            prefill_infos.append(await server_info.json())
+        except Exception as e:
+            logger.error(f"Failed to get info from prefill server {server}: {e}")
+
+    if ENABLE_DEBUG_LOGGING:
+        logger.debug(f"Fetching server info from {len(decode_servers)} decode servers")
+    for server in chain(decode_servers):
+        try:
+            server_info = await session.get(f"{server}/get_server_info")
+            info_json = await server_info.json()
+            decode_infos.append(info_json)
+            # Extract internal_states from decode servers
+            if "internal_states" in info_json:
+                all_internal_states.extend(info_json["internal_states"])
+        except Exception as e:
+            logger.error(f"Failed to get info from decode server {server}: {e}")
 
     # Return format expected by bench_one_batch_server.py
     if all_internal_states:
@@ -899,21 +952,25 @@ async def get_models():
     prefill_server = load_balancer.prefill_servers[0]  # Get the first prefill server
     logger.info(f"Fetching models from prefill server: {prefill_server}")
 
-    async with aiohttp.ClientSession() as session:
-        try:
-            response = await session.get(f"{prefill_server}/v1/models")
-            if response.status != 200:
-                logger.error(f"Prefill server error: Status {response.status}")
-                raise HTTPException(
-                    status_code=response.status,
-                    detail=f"Prefill server error: Status {response.status}",
-                )
-            models = await response.json()
-            logger.info(f"Successfully retrieved models from prefill server")
-            return ORJSONResponse(content=models)
-        except Exception as e:
-            logger.error(f"Failed to fetch models: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for get models")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
+    session = await load_balancer.get_session()
+    try:
+        response = await session.get(f"{prefill_server}/v1/models")
+        if response.status != 200:
+            logger.error(f"Prefill server error: Status {response.status}")
+            raise HTTPException(
+                status_code=response.status,
+                detail=f"Prefill server error: Status {response.status}",
+            )
+        models = await response.json()
+        logger.info(f"Successfully retrieved models from prefill server")
+        return ORJSONResponse(content=models)
+    except Exception as e:
+        logger.error(f"Failed to fetch models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/register")
@@ -979,6 +1036,19 @@ def run(
 
     load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs)
     logger.info("Load balancer initialized successfully")
+
+    # Add signal handlers for graceful shutdown
+    import signal
+    import sys
+
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        if load_balancer:
+            asyncio.create_task(load_balancer.close_session())
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     uvicorn.run(app, host=host, port=port)
 
