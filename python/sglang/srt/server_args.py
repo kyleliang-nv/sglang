@@ -81,6 +81,7 @@ class ServerArgs:
     # Memory and scheduling
     mem_fraction_static: Optional[float] = None
     max_running_requests: Optional[int] = None
+    max_decode_server_requests: Optional[int] = None
     max_queued_requests: Optional[int] = sys.maxsize
     max_total_tokens: Optional[int] = None
     chunked_prefill_size: Optional[int] = None
@@ -910,6 +911,12 @@ class ServerArgs:
             type=int,
             default=ServerArgs.max_running_requests,
             help="The maximum number of running requests.",
+        )
+        parser.add_argument(
+            "--max-decode-server-requests",
+            type=int,
+            default=ServerArgs.max_decode_server_requests,
+            help="The maximum number of requests on the decode server (including prealloc, transfer, waiting, and running phases). When not specified, defaults to max_running_requests.",
         )
         parser.add_argument(
             "--max-queued-requests",

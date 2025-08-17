@@ -86,8 +86,12 @@ class DecodeReqToTokenPool:
     In ReqToTokenPool, if `--max-running-requests` is 8,
     #pre-allocated + #transfer + #running <= 8, but there are in fact more memory can carry pre-allocated requests.
 
-    In DecodeReqToTokenPool, if `--max-running-requests` is 8,
-    #running <= 8, #pre-allocated + #transfer <= pre_alloc_size, so we can use the free memory to pre-allocate requests to unblock prefill.
+    In DecodeReqToTokenPool, if `--max-running-requests` is 8 and `--max-decode-server-requests` is 16:
+    #running <= 8, #pre-allocated + #transfer + #running <= 16, so we can use the free memory to pre-allocate requests to unblock prefill.
+
+    The total_request_limit parameter controls the maximum number of requests that can be on the decode server
+    across all phases (prealloc, transfer, waiting, running), while the size parameter controls only the
+    maximum number of running requests.
     """
 
     def __init__(
@@ -97,28 +101,60 @@ class DecodeReqToTokenPool:
         device: str,
         enable_memory_saver: bool,
         pre_alloc_size: int,
+        total_request_limit: Optional[int] = None,
     ):
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=enable_memory_saver
         )
 
-        self.size = size
+        self.size = size  # Controls running requests
         self.max_context_len = max_context_len
         self.device = device
         self.pre_alloc_size = pre_alloc_size
+        self.total_request_limit = (
+            total_request_limit  # Controls total requests on server
+        )
+
+        # Calculate the actual pool size based on total_request_limit
+        if total_request_limit is not None:
+            self.pool_size = total_request_limit
+        else:
+            self.pool_size = size + pre_alloc_size
+
         with memory_saver_adapter.region(tag=GPU_MEMORY_TYPE_KV_CACHE):
             self.req_to_token = torch.zeros(
-                (size + pre_alloc_size, max_context_len),
+                (self.pool_size, max_context_len),
                 dtype=torch.int32,
                 device=device,
             )
 
-        self.free_slots = list(range(size + pre_alloc_size))
+        self.free_slots = list(range(self.pool_size))
 
     def write(self, indices, values):
         self.req_to_token[indices] = values
 
     def available_size(self):
+        return len(self.free_slots)
+
+    def can_accept_new_request(self) -> bool:
+        """
+        Check if we can accept a new request based on the total request limit.
+        This ensures we don't exceed the total number of requests allowed on the decode server.
+        """
+        if self.total_request_limit is None:
+            return True  # No limit set, always accept
+        return len(self.free_slots) > 0
+
+    def get_total_request_count(self) -> int:
+        """
+        Get the total number of requests currently using memory slots.
+        """
+        return self.pool_size - len(self.free_slots)
+
+    def get_available_slots(self) -> int:
+        """
+        Get the number of available slots for new requests.
+        """
         return len(self.free_slots)
 
     def alloc(self, need_size: int) -> List[int]:
@@ -136,7 +172,7 @@ class DecodeReqToTokenPool:
             self.free_slots.extend(free_index)
 
     def clear(self):
-        self.free_slots = list(range(self.size + self.pre_alloc_size))
+        self.free_slots = list(range(self.pool_size))
 
 
 @dataclass
@@ -436,6 +472,16 @@ class DecodePreallocQueue:
     def add(self, req: Req, is_retracted: bool = False) -> None:
         """Add a request to the pending queue."""
         if self._check_if_req_exceed_kv_capacity(req):
+            return
+
+        # Check if we can accept new requests based on total limit
+        if not is_retracted and not self.req_to_token_pool.can_accept_new_request():
+            logger.warning(
+                f"Request {req.rid} rejected: decode server at capacity limit"
+            )
+            # Reject the request by setting it as finished
+            req.finished_reason = "decode_server_at_capacity"
+            self.scheduler.stream_output([req], req.return_logprob)
             return
 
         if is_retracted:
@@ -1281,6 +1327,25 @@ class SchedulerDisaggregationDecodeMixin:
         if len(self.disagg_decode_prealloc_queue.retracted_queue) > 0:
             # if there are still retracted requests, we do not allocate new requests
             return
+
+        # Log current request counts across all phases
+        if hasattr(self, "req_to_token_pool") and hasattr(
+            self.req_to_token_pool, "get_total_request_count"
+        ):
+            total_requests = self.req_to_token_pool.get_total_request_count()
+            available_slots = self.req_to_token_pool.get_available_slots()
+            running_requests = (
+                self.running_batch.batch_size() if hasattr(self, "running_batch") else 0
+            )
+            prealloc_requests = len(self.disagg_decode_prealloc_queue.queue)
+            transfer_requests = len(self.disagg_decode_transfer_queue.queue)
+            waiting_requests = len(self.waiting_queue)
+
+            logger.debug(
+                f"Decode server status - Total: {total_requests}, Available: {available_slots}, "
+                f"Running: {running_requests}, Prealloc: {prealloc_requests}, "
+                f"Transfer: {transfer_requests}, Waiting: {waiting_requests}"
+            )
 
         req_conns = self.disagg_decode_prealloc_queue.pop_preallocated()
         self.disagg_decode_transfer_queue.extend(req_conns)
