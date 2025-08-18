@@ -287,6 +287,12 @@ class ServerArgs:
     enable_pdmux: bool = False
     sm_group_num: int = 3
 
+    # Multiple detokenizer workers
+    num_detokenizer_workers: int = 1
+    detokenizer_worker_load_balance: str = (
+        "round_robin"  # "round_robin", "least_connections", "random"
+    )
+
     # Deprecated arguments
     enable_ep_moe: bool = False
     enable_deepep_moe: bool = False
@@ -1985,6 +1991,21 @@ class ServerArgs:
             "--weight-loader-disable-mmap",
             action="store_true",
             help="Disable mmap while loading weight using safetensors.",
+        )
+
+        # Multiple detokenizer workers
+        parser.add_argument(
+            "--num-detokenizer-workers",
+            type=int,
+            default=ServerArgs.num_detokenizer_workers,
+            help="Number of detokenizer workers. Default is 1.",
+        )
+        parser.add_argument(
+            "--detokenizer-worker-load-balance",
+            type=str,
+            default=ServerArgs.detokenizer_worker_load_balance,
+            choices=["round_robin", "least_connections", "random"],
+            help="Load balancing strategy for detokenizer workers. Default is round_robin.",
         )
 
         # Deprecated arguments

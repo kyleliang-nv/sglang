@@ -22,7 +22,7 @@ import threading
 import time
 from enum import Enum, auto
 from multiprocessing import shared_memory
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import psutil
 import setproctitle
@@ -69,6 +69,7 @@ class DataParallelController:
         server_args: ServerArgs,
         port_args: PortArgs,
         dp_balance_meta: DPBalanceMeta,
+        detokenizer_port_args_list: Optional[List[PortArgs]] = None,
     ) -> None:
         # for dp balance
         self.global_balance_id = 0
@@ -78,6 +79,7 @@ class DataParallelController:
         self.max_total_num_tokens = None
         self.server_args = server_args
         self.port_args = port_args
+        self.detokenizer_port_args_list = detokenizer_port_args_list
         self.load_balance_method = LoadBalanceMethod.from_str(
             server_args.load_balance_method
         )
@@ -144,7 +146,14 @@ class DataParallelController:
             # Create a thread for each worker
             thread = threading.Thread(
                 target=self.launch_tensor_parallel_group_thread,
-                args=(server_args, tmp_port_args, base_gpu_id, dp_rank, ready_event),
+                args=(
+                    server_args,
+                    tmp_port_args,
+                    base_gpu_id,
+                    dp_rank,
+                    ready_event,
+                    self.detokenizer_port_args_list,
+                ),
             )
             threads.append(thread)
             base_gpu_id += server_args.tp_size * server_args.gpu_id_step
@@ -168,8 +177,11 @@ class DataParallelController:
         base_gpu_id: int,
         dp_rank: int,
         ready_event: threading.Event,
+        detokenizer_port_args_list: Optional[List[PortArgs]] = None,
     ):
-        self.launch_tensor_parallel_group(server_args, port_args, base_gpu_id, dp_rank)
+        self.launch_tensor_parallel_group(
+            server_args, port_args, base_gpu_id, dp_rank, detokenizer_port_args_list
+        )
         ready_event.set()
 
         # This thread cannot be closed because otherwise the `kill_itself_when_parent_died`
@@ -190,6 +202,7 @@ class DataParallelController:
         port_args: PortArgs,
         base_gpu_id: int,
         dp_rank: int,
+        detokenizer_port_args_list: Optional[List[PortArgs]] = None,
     ):
         if not server_args.enable_dp_attention:
             logger.info(f"Launch DP{dp_rank} starting at GPU #{base_gpu_id}.")
@@ -251,6 +264,11 @@ class DataParallelController:
                         dp_rank,
                         writer,
                         self.balance_meta,
+                    )
+                    + (
+                        (detokenizer_port_args_list,)
+                        if detokenizer_port_args_list
+                        else ()
                     ),
                 )
                 with memory_saver_adapter.configure_subprocess():
@@ -342,6 +360,7 @@ def run_data_parallel_controller_process(
     server_args: ServerArgs,
     port_args: PortArgs,
     pipe_writer,
+    detokenizer_port_args_list: Optional[List[PortArgs]] = None,
 ):
     setproctitle.setproctitle("sglang::data_parallel_controller")
     configure_logger(server_args)
@@ -350,7 +369,10 @@ def run_data_parallel_controller_process(
 
     try:
         controller = DataParallelController(
-            server_args, port_args, dp_balance_meta=balance_meta
+            server_args,
+            port_args,
+            dp_balance_meta=balance_meta,
+            detokenizer_port_args_list=detokenizer_port_args_list,
         )
         pipe_writer.send(
             {

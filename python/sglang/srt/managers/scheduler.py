@@ -280,10 +280,37 @@ class Scheduler(
                     context, zmq.PUSH, port_args.tokenizer_ipc_name, False
                 )
             else:
-                # Send to the DetokenizerManager
-                self.send_to_detokenizer = get_zmq_socket(
-                    context, zmq.PUSH, port_args.detokenizer_ipc_name, False
-                )
+                # Check if we have multiple detokenizer workers
+                if (
+                    hasattr(server_args, "num_detokenizer_workers")
+                    and server_args.num_detokenizer_workers > 1
+                ):
+                    # Use load balancer for multiple workers
+                    try:
+                        from sglang.srt.managers.detokenizer_load_balancer import (
+                            DetokenizerLoadBalancer,
+                        )
+
+                        # Note: We'll initialize the load balancer later when we have the port args list
+                        self.send_to_detokenizer = None  # Will be set to load balancer
+                        self.use_detokenizer_load_balancer = True
+                        logger.info(
+                            f"🔀 Scheduler configured to use detokenizer load balancer with {server_args.num_detokenizer_workers} workers"
+                        )
+                    except ImportError:
+                        logger.warning(
+                            "⚠️ Detokenizer load balancer not available, falling back to single worker"
+                        )
+                        self.send_to_detokenizer = get_zmq_socket(
+                            context, zmq.PUSH, port_args.detokenizer_ipc_name, False
+                        )
+                        self.use_detokenizer_load_balancer = False
+                else:
+                    # Send to the DetokenizerManager (single worker)
+                    self.send_to_detokenizer = get_zmq_socket(
+                        context, zmq.PUSH, port_args.detokenizer_ipc_name, False
+                    )
+                    self.use_detokenizer_load_balancer = False
 
             if self.server_args.sleep_on_idle:
                 self.idle_sleeper = IdleSleeper(
@@ -2537,6 +2564,33 @@ class Scheduler(
         if self.idle_sleeper is not None:
             self.idle_sleeper.maybe_sleep()
 
+    def init_detokenizer_load_balancer(self, detokenizer_port_args_list):
+        """Initialize the detokenizer load balancer with multiple worker port args."""
+        if (
+            hasattr(self, "use_detokenizer_load_balancer")
+            and self.use_detokenizer_load_balancer
+        ):
+            try:
+                from sglang.srt.managers.detokenizer_load_balancer import (
+                    DetokenizerLoadBalancer,
+                )
+
+                self.detokenizer_load_balancer = DetokenizerLoadBalancer(
+                    self.server_args, detokenizer_port_args_list
+                )
+                # Replace the send_to_detokenizer with the load balancer
+                self.send_to_detokenizer = self.detokenizer_load_balancer
+                logger.info("🔀 Detokenizer load balancer initialized successfully")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize detokenizer load balancer: {e}")
+                # Fallback to single worker
+                self.use_detokenizer_load_balancer = False
+                # We need to create a new socket since the original was set to None
+                context = zmq.Context(2)
+                self.send_to_detokenizer = get_zmq_socket(
+                    context, zmq.PUSH, self.port_args.detokenizer_ipc_name, False
+                )
+
 
 class IdleSleeper:
     """
@@ -2585,6 +2639,7 @@ def run_scheduler_process(
     dp_rank: Optional[int],
     pipe_writer,
     balance_meta: Optional[DPBalanceMeta] = None,
+    detokenizer_port_args_list: Optional[List[PortArgs]] = None,
 ):
     # Generate the prefix
     prefix = ""
@@ -2627,6 +2682,14 @@ def run_scheduler_process(
             dp_rank,
             dp_balance_meta=balance_meta,
         )
+
+        # Initialize detokenizer load balancer if multiple workers are available
+        if (
+            detokenizer_port_args_list is not None
+            and len(detokenizer_port_args_list) > 1
+        ):
+            scheduler.init_detokenizer_load_balancer(detokenizer_port_args_list)
+
         pipe_writer.send(
             {
                 "status": "ready",

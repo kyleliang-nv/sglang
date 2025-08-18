@@ -23,10 +23,12 @@ import dataclasses
 import logging
 import multiprocessing as mp
 import os
-import signal
-import threading
+import random
+import tempfile
+import time
 from typing import AsyncIterator, Dict, Iterator, List, Optional, Tuple, Union
 
+import psutil
 import zmq
 import zmq.asyncio
 from PIL.Image import Image
@@ -76,6 +78,7 @@ from sglang.srt.utils import (
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
+from sglang.utils import get_exception_traceback
 from sglang.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -727,19 +730,27 @@ def _launch_subprocesses(
                     + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
                 )
                 moe_ep_rank = tp_rank // (server_args.tp_size // server_args.ep_size)
+
+                # Pass detokenizer port args if multiple workers are configured
+                scheduler_args = (
+                    server_args,
+                    port_args,
+                    gpu_id,
+                    tp_rank,
+                    moe_ep_rank,
+                    pp_rank,
+                    None,
+                    writer,
+                    None,
+                )
+
+                # If we have multiple detokenizer workers, add the port args list
+                if server_args.num_detokenizer_workers > 1:
+                    scheduler_args = scheduler_args + (detoken_port_args_list,)
+
                 proc = mp.Process(
                     target=run_scheduler_process,
-                    args=(
-                        server_args,
-                        port_args,
-                        gpu_id,
-                        tp_rank,
-                        moe_ep_rank,
-                        pp_rank,
-                        None,
-                        writer,
-                        None,
-                    ),
+                    args=scheduler_args,
                 )
 
                 with memory_saver_adapter.configure_subprocess():
@@ -750,9 +761,15 @@ def _launch_subprocesses(
         # Launch the data parallel controller
         reader, writer = mp.Pipe(duplex=False)
         scheduler_pipe_readers = [reader]
+
+        # Pass detokenizer port args if multiple workers are configured
+        controller_args = (server_args, port_args, writer)
+        if server_args.num_detokenizer_workers > 1:
+            controller_args = controller_args + (detoken_port_args_list,)
+
         proc = mp.Process(
             target=run_data_parallel_controller_process,
-            args=(server_args, port_args, writer),
+            args=controller_args,
         )
         proc.start()
         scheduler_procs.append(proc)
@@ -790,6 +807,45 @@ def _launch_subprocesses(
     )
     detoken_proc.start()
 
+    # Launch multiple detokenizer workers if configured
+    detoken_procs = [detoken_proc]  # Keep the first one for backward compatibility
+    detoken_port_args_list = [port_args]  # List of port args for all workers
+
+    if server_args.num_detokenizer_workers > 1:
+        logger.info(
+            f"🚀 Launching {server_args.num_detokenizer_workers} detokenizer workers..."
+        )
+
+        # Create additional port args for extra workers
+        for i in range(1, server_args.num_detokenizer_workers):
+            # Create new port args with unique IPC names
+            worker_port_args = PortArgs(
+                tokenizer_ipc_name=port_args.tokenizer_ipc_name,  # Same tokenizer
+                scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,  # Same scheduler
+                detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                nccl_port=port_args.nccl_port,
+                rpc_ipc_name=port_args.rpc_ipc_name,
+                metrics_ipc_name=port_args.metrics_ipc_name,
+            )
+
+            # Launch additional detokenizer worker
+            worker_proc = mp.Process(
+                target=run_detokenizer_process,
+                args=(
+                    server_args,
+                    worker_port_args,
+                ),
+            )
+            worker_proc.start()
+            detoken_procs.append(worker_proc)
+            detoken_port_args_list.append(worker_port_args)
+
+            logger.info(
+                f"🔌 Launched detokenizer worker {i+1} with IPC: {worker_port_args.detokenizer_ipc_name}"
+            )
+    else:
+        logger.info("🔌 Using single detokenizer worker")
+
     # Launch tokenizer process
     tokenizer_manager = TokenizerManager(server_args, port_args)
 
@@ -824,4 +880,14 @@ def _launch_subprocesses(
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
-    return tokenizer_manager, template_manager, scheduler_info
+
+    # Return detokenizer information for multiple workers
+    if server_args.num_detokenizer_workers > 1:
+        return (
+            tokenizer_manager,
+            template_manager,
+            scheduler_info,
+            detoken_port_args_list,
+        )
+    else:
+        return tokenizer_manager, template_manager, scheduler_info
