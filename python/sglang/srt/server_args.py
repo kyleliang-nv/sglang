@@ -116,6 +116,8 @@ class ServerArgs:
     log_requests: bool = False
     log_requests_level: int = 2
     enable_prefill_request_flow_logging: bool = False
+    enable_detokenizer_logging: bool = False
+    detokenizer_log_interval: int = 100
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
@@ -1112,6 +1114,18 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.enable_prefill_request_flow_logging,
             help="Enable detailed request flow logging for prefill server. Shows how requests move through different stages (bootstrap, waiting, processing, inflight).",
+        )
+        parser.add_argument(
+            "--enable-detokenizer-logging",
+            action="store_true",
+            default=ServerArgs.enable_detokenizer_logging,
+            help="Enable detailed performance logging for detokenizer. Shows queue sizes, processing latency, throughput, and bottleneck detection.",
+        )
+        parser.add_argument(
+            "--detokenizer-log-interval",
+            type=int,
+            default=ServerArgs.detokenizer_log_interval,
+            help="Log detokenizer performance stats every N requests (default: 100).",
         )
         parser.add_argument(
             "--crash-dump-folder",

@@ -17,6 +17,7 @@ import dataclasses
 import logging
 import os
 import signal
+import time
 from collections import OrderedDict
 from typing import Dict, List, Union
 
@@ -95,6 +96,23 @@ class DetokenizerManager:
         self.decode_status = LimitedCapacityDict(capacity=DETOKENIZER_MAX_STATES)
         self.is_dummy = server_args.load_format == "dummy"
 
+        # Performance monitoring
+        self.server_args = server_args
+        self.performance_stats = {
+            "total_requests": 0,
+            "total_tokens_processed": 0,
+            "total_processing_time": 0.0,
+            "queue_size_history": [],
+            "processing_latency_history": [],
+            "last_log_time": 0.0,
+            "log_interval": getattr(
+                server_args, "detokenizer_log_interval", 100
+            ),  # Log every 100 requests
+            "enable_detokenizer_logging": getattr(
+                server_args, "enable_detokenizer_logging", False
+            ),
+        }
+
         self._request_dispatcher = TypeBasedDispatcher(
             [
                 (BatchEmbeddingOut, self.handle_batch_embedding_out),
@@ -103,12 +121,136 @@ class DetokenizerManager:
             ]
         )
 
+        # Initialize performance monitoring
+        if self.performance_stats["enable_detokenizer_logging"]:
+            logger.info("🔍 Detokenizer performance monitoring enabled")
+            logger.info(
+                f"📊 Log interval: every {self.performance_stats['log_interval']} requests"
+            )
+
+    def _update_performance_stats(
+        self, request_count: int, token_count: int, processing_time: float
+    ):
+        """Update performance statistics"""
+        if not self.performance_stats["enable_detokenizer_logging"]:
+            return
+
+        self.performance_stats["total_requests"] += request_count
+        self.performance_stats["total_tokens_processed"] += token_count
+        self.performance_stats["total_processing_time"] += processing_time
+
+        # Store recent history (keep last 100 entries)
+        if len(self.performance_stats["processing_latency_history"]) >= 100:
+            self.performance_stats["processing_latency_history"].pop(0)
+        self.performance_stats["processing_latency_history"].append(processing_time)
+
+        # Log performance stats periodically
+        if (
+            self.performance_stats["total_requests"]
+            % self.performance_stats["log_interval"]
+            == 0
+            and self.performance_stats["total_requests"] > 0
+        ):
+            self._log_performance_stats()
+
+    def _log_performance_stats(self):
+        """Log comprehensive performance statistics"""
+        if not self.performance_stats["enable_detokenizer_logging"]:
+            return
+
+        total_reqs = self.performance_stats["total_requests"]
+        total_tokens = self.performance_stats["total_tokens_processed"]
+        total_time = self.performance_stats["total_processing_time"]
+
+        # Calculate metrics
+        avg_latency = total_time / total_reqs if total_reqs > 0 else 0
+        throughput = total_tokens / total_time if total_time > 0 else 0
+        queue_size = len(self.decode_status)
+
+        # Calculate recent latency statistics
+        recent_latencies = self.performance_stats["processing_latency_history"][
+            -10:
+        ]  # Last 10 requests
+        avg_recent_latency = (
+            sum(recent_latencies) / len(recent_latencies) if recent_latencies else 0
+        )
+        max_recent_latency = max(recent_latencies) if recent_latencies else 0
+
+        # Determine bottleneck status
+        bottleneck_status = "🟢 Healthy"
+        if avg_recent_latency > 0.1:  # > 100ms
+            bottleneck_status = "🔴 Bottleneck"
+        elif avg_recent_latency > 0.05:  # > 50ms
+            bottleneck_status = "🟡 Warning"
+
+        # Log comprehensive stats
+        logger.info(
+            f"📊 Detokenizer Performance Stats (last {self.performance_stats['log_interval']} requests):"
+        )
+        logger.info(
+            f"   {bottleneck_status} - Avg Latency: {avg_recent_latency*1000:.1f}ms, Max: {max_recent_latency*1000:.1f}ms"
+        )
+        logger.info(
+            f"   📈 Throughput: {throughput:.1f} tokens/sec, Queue Size: {queue_size}"
+        )
+        logger.info(
+            f"   📊 Total: {total_reqs} requests, {total_tokens} tokens, {total_time:.2f}s"
+        )
+
+        # Log queue size warning if high
+        if queue_size > 1000:
+            logger.warning(
+                f"⚠️  High detokenizer queue size: {queue_size} requests - potential bottleneck!"
+            )
+        elif queue_size > 500:
+            logger.info(f"📋 Moderate detokenizer queue size: {queue_size} requests")
+
+        # Store queue size history for trend analysis
+        if len(self.performance_stats["queue_size_history"]) >= 100:
+            self.performance_stats["queue_size_history"].pop(0)
+        self.performance_stats["queue_size_history"].append(queue_size)
+
+        # Log queue size trends
+        if len(self.performance_stats["queue_size_history"]) >= 10:
+            recent_queue_sizes = self.performance_stats["queue_size_history"][-10:]
+            avg_queue_size = sum(recent_queue_sizes) / len(recent_queue_sizes)
+            if queue_size > avg_queue_size * 1.5:  # 50% increase
+                logger.warning(
+                    f"📈 Queue size increasing: {queue_size} (avg: {avg_queue_size:.1f}) - monitor for bottlenecks"
+                )
+
     def event_loop(self):
         """The event loop that handles requests"""
         while True:
+            start_time = time.time()
             recv_obj = self.recv_from_scheduler.recv_pyobj()
+
+            # Process the request
             output = self._request_dispatcher(recv_obj)
             self.send_to_tokenizer.send_pyobj(output)
+
+            # Update performance stats
+            processing_time = time.time() - start_time
+            request_count = 1
+            token_count = self._count_tokens_in_request(recv_obj)
+            self._update_performance_stats(request_count, token_count, processing_time)
+
+    def _count_tokens_in_request(self, recv_obj) -> int:
+        """Count the number of tokens in a request for performance monitoring"""
+        try:
+            if hasattr(recv_obj, "decode_ids"):
+                # BatchTokenIDOut
+                total_tokens = 0
+                for decode_ids in recv_obj.decode_ids:
+                    total_tokens += len(decode_ids)
+                return total_tokens
+            elif hasattr(recv_obj, "output_ids"):
+                # BatchEmbeddingOut or other types
+                return len(recv_obj.output_ids) if recv_obj.output_ids else 0
+            else:
+                return 1  # Default to 1 if we can't determine
+        except Exception:
+            return 1  # Fallback to 1 on error
 
     def trim_matched_stop(
         self, output: Union[str, List[int]], finished_reason: Dict, no_stop_trim: bool
