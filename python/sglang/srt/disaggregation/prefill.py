@@ -494,7 +494,7 @@ class SchedulerDisaggregationPrefillMixin:
                             req,
                             "Processing",
                             "exiting",
-                            "Batch processing completed (overlap mode)",
+                            "Batch processing completed (overlap mode - previous batch)",
                         )
 
             if len(self.disagg_prefill_inflight_queue) > 0:
@@ -565,7 +565,7 @@ class SchedulerDisaggregationPrefillMixin:
                     req,
                     "InflightQueue",
                     "entering",
-                    "Prefill completed, KV transfer started",
+                    "Prefill completed, KV transfer started (from previous batch)",
                 )
 
                 if logits_output.hidden_states is not None:

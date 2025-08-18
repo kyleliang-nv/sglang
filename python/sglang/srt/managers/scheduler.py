@@ -1644,6 +1644,21 @@ class Scheduler(
             for req in can_run_list:
                 req.queue_time_end = time.perf_counter()
 
+        # Log requests exiting WaitingQueue before removing them
+        if (
+            hasattr(self.server_args, "enable_prefill_request_flow_logging")
+            and self.server_args.enable_prefill_request_flow_logging
+        ):
+            for req in can_run_list:
+                try:
+                    from sglang.srt.disaggregation.prefill import log_request_flow
+
+                    log_request_flow(
+                        req, "WaitingQueue", "exiting", "Moved to processing batch"
+                    )
+                except ImportError:
+                    pass  # Silently fail if logging not available
+
         self.waiting_queue = [
             x for x in self.waiting_queue if x not in set(can_run_list)
         ]
