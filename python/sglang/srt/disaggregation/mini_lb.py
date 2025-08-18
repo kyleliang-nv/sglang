@@ -265,25 +265,19 @@ class MiniLoadBalancer:
                 if self.session is None or self.session.closed:
                     # Configure connection pooling to prevent file descriptor exhaustion
                     # Allow tuning via environment variables
-                    connector_kwargs = {
-                        "limit": int(os.getenv("PDLB_CONNECTION_LIMIT", "100")),
-                        "limit_per_host": int(
+                    connector = aiohttp.TCPConnector(
+                        limit=int(
+                            os.getenv("PDLB_CONNECTION_LIMIT", "100")
+                        ),  # Total connection pool size
+                        limit_per_host=int(
                             os.getenv("PDLB_CONNECTION_LIMIT_PER_HOST", "20")
-                        ),
-                        "use_dns_cache": True,
-                        "keepalive_timeout": int(
+                        ),  # Connections per host
+                        use_dns_cache=True,
+                        keepalive_timeout=int(
                             os.getenv("PDLB_KEEPALIVE_TIMEOUT", "30")
                         ),
-                    }
-
-                    # Add enable_cleanup_closed if supported by this aiohttp version
-                    try:
-                        connector_kwargs["enable_cleanup_closed"] = True
-                    except (TypeError, AttributeError):
-                        # Older aiohttp versions don't support this parameter
-                        pass
-
-                    connector = aiohttp.TCPConnector(**connector_kwargs)
+                        enable_cleanup_closed=True,
+                    )
                     self.session = aiohttp.ClientSession(
                         connector=connector,
                         timeout=aiohttp.ClientTimeout(total=3600),
@@ -291,7 +285,7 @@ class MiniLoadBalancer:
                     logger.info(
                         f"Created new aiohttp session with connection pooling: "
                         f"limit={connector.limit}, limit_per_host={connector.limit_per_host}, "
-                        f"keepalive_timeout={getattr(connector, '_keepalive_timeout', 'N/A')}"
+                        f"keepalive_timeout={connector.keepalive_timeout}"
                     )
         return self.session
 
