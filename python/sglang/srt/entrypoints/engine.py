@@ -24,6 +24,7 @@ import logging
 import multiprocessing as mp
 import os
 import random
+import signal
 import tempfile
 import threading
 import time
