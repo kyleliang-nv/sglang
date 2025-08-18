@@ -887,12 +887,6 @@ def _launch_subprocesses(
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
 
     # Return detokenizer information for multiple workers
-    if server_args.num_detokenizer_workers > 1:
-        return (
-            tokenizer_manager,
-            template_manager,
-            scheduler_info,
-            detoken_port_args_list,
-        )
-    else:
-        return tokenizer_manager, template_manager, scheduler_info
+    # Always return 3 values for backward compatibility
+    # The detoken_port_args_list is available via port_args if needed
+    return tokenizer_manager, template_manager, scheduler_info
