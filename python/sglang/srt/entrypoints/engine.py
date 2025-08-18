@@ -703,6 +703,9 @@ def _launch_subprocesses(
         server_args.model_path, server_args.tokenizer_path
     )
 
+    # Initialize detokenizer port args list for multiple workers
+    detoken_port_args_list = [port_args]  # Default to single worker
+
     scheduler_procs = []
     if server_args.dp_size == 1:
         memory_saver_adapter = TorchMemorySaverAdapter.create(
