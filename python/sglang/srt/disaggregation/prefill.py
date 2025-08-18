@@ -55,6 +55,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Global flag to control request flow logging
+ENABLE_REQUEST_FLOW_LOGGING = True
+
 
 def safe_log(level: str, message: str) -> None:
     """Safely log a message, with fallback to stderr if logging fails."""
@@ -67,6 +70,64 @@ def safe_log(level: str, message: str) -> None:
             print(f"[{level.upper()}] {message}", file=sys.stderr)
         except Exception:
             # If even stderr fails, just pass silently
+            pass
+
+
+def enable_request_flow_logging(enable: bool = True):
+    """Enable or disable request flow logging for the prefill server"""
+    global ENABLE_REQUEST_FLOW_LOGGING
+    ENABLE_REQUEST_FLOW_LOGGING = enable
+    if enable:
+        logger.info("🔄 Prefill request flow logging enabled")
+    else:
+        logger.info("🔇 Prefill request flow logging disabled")
+
+
+def log_request_flow(req: Req, stage: str, action: str, additional_info: str = ""):
+    """Log request flow through different stages of the prefill server"""
+    if not ENABLE_REQUEST_FLOW_LOGGING:
+        return
+
+    try:
+        # Get request context information
+        tp_rank = getattr(req, "data_parallel_rank", "N/A")
+        pp_rank = getattr(req, "pp_rank", "N/A")
+        bootstrap_room = getattr(req, "bootstrap_room", "N/A")
+
+        # Format the log message
+        info_part = f" - {additional_info}" if additional_info else ""
+        message = f"🔄 Request {req.rid} {action} {stage} - TP:{tp_rank} PP:{pp_rank} Bootstrap:{bootstrap_room}{info_part}"
+
+        logger.info(message)
+    except Exception:
+        # Fallback to basic logging if detailed logging fails
+        try:
+            logger.info(f"Request {req.rid} {action} {stage}")
+        except Exception:
+            pass
+
+
+def log_queue_status(queue_name: str, queue_size: int, request_ids: List[str] = None):
+    """Log queue status information"""
+    if not ENABLE_REQUEST_FLOW_LOGGING:
+        return
+
+    try:
+        if request_ids and len(request_ids) > 0:
+            # Show first few request IDs for debugging
+            ids_display = request_ids[:5]
+            if len(request_ids) > 5:
+                ids_display.append("...")
+            message = f"📊 {queue_name}: {queue_size} requests - IDs: {ids_display}"
+        else:
+            message = f"📊 {queue_name}: {queue_size} requests"
+
+        logger.info(message)
+    except Exception:
+        # Fallback to basic logging
+        try:
+            logger.info(f"{queue_name}: {queue_size} requests")
+        except Exception:
             pass
 
 
@@ -113,6 +174,19 @@ class PrefillBootstrapQueue:
         self.scheduler = scheduler
         self.transfer_backend = transfer_backend
         self.kv_manager = self._init_kv_manager()
+
+        # Initialize request flow logging based on server args
+        if hasattr(scheduler, "server_args") and hasattr(
+            scheduler.server_args, "enable_prefill_request_flow_logging"
+        ):
+            global ENABLE_REQUEST_FLOW_LOGGING
+            ENABLE_REQUEST_FLOW_LOGGING = (
+                scheduler.server_args.enable_prefill_request_flow_logging
+            )
+            if ENABLE_REQUEST_FLOW_LOGGING:
+                logger.info(
+                    "🔄 Prefill request flow logging initialized from server args"
+                )
 
     def _init_kv_manager(self) -> BaseKVManager:
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
@@ -183,6 +257,9 @@ class PrefillBootstrapQueue:
 
         self.queue.append(req)
 
+        # Log request entering bootstrap queue
+        log_request_flow(req, "BootstrapQueue", "entering", "Added to bootstrap queue")
+
     def extend(self, reqs: List[Req], num_kv_heads: int) -> None:
         for req in reqs:
             self.add(req, num_kv_heads)
@@ -251,6 +328,15 @@ class PrefillBootstrapQueue:
                 except Exception as e:
                     error_message += f" with exception {e}"
                 logger.error(error_message)
+
+                # Log bootstrap failure
+                log_request_flow(
+                    req,
+                    "BootstrapQueue",
+                    "failed",
+                    f"Bootstrap failed: {error_message}",
+                )
+
                 prepare_abort(
                     req, error_message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR
                 )
@@ -271,12 +357,34 @@ class PrefillBootstrapQueue:
 
             num_pages = kv_to_page_num(num_kv_indices, self.token_to_kv_pool.page_size)
             req.disagg_kv_sender.init(num_pages, req.metadata_buffer_index)
+
+            # Log successful bootstrap completion
+            log_request_flow(
+                req,
+                "BootstrapQueue",
+                "exiting",
+                f"Bootstrap completed, {num_pages} pages allocated",
+            )
+
             bootstrapped_reqs.append(req)
             indices_to_remove.add(i)
 
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
+
+        # Log queue transitions
+        if bootstrapped_reqs:
+            for req in bootstrapped_reqs:
+                log_request_flow(
+                    req, "WaitingQueue", "entering", "Moved from bootstrap queue"
+                )
+            logger.info(
+                f"📤 Moved {len(bootstrapped_reqs)} requests from BootstrapQueue to WaitingQueue"
+            )
+
+        if failed_reqs:
+            logger.info(f"❌ Failed {len(failed_reqs)} requests in BootstrapQueue")
 
         if return_failed_reqs is False:
             return bootstrapped_reqs
@@ -307,8 +415,20 @@ class SchedulerDisaggregationPrefillMixin:
             self.cur_batch = batch
 
             if batch:
+                # Log requests entering processing
+                for req in batch.reqs:
+                    log_request_flow(
+                        req, "Processing", "entering", f"Batch size: {len(batch.reqs)}"
+                    )
+
                 result = self.run_batch(batch)
                 self.process_batch_result_disagg_prefill(batch, result)
+
+                # Log requests completing processing
+                for req in batch.reqs:
+                    log_request_flow(
+                        req, "Processing", "exiting", "Batch processing completed"
+                    )
 
             if len(self.disagg_prefill_inflight_queue) > 0:
                 self.process_disagg_prefill_inflight_queue()
@@ -338,6 +458,15 @@ class SchedulerDisaggregationPrefillMixin:
                 batch = self.prepare_mlp_sync_batch(batch)
             self.cur_batch = batch
             if batch:
+                # Log requests entering processing
+                for req in batch.reqs:
+                    log_request_flow(
+                        req,
+                        "Processing",
+                        "entering",
+                        f"Batch size: {len(batch.reqs)} (overlap mode)",
+                    )
+
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
 
@@ -357,6 +486,16 @@ class SchedulerDisaggregationPrefillMixin:
                     self.tp_worker.cur_sampling_info if batch else None
                 )
                 self.process_batch_result_disagg_prefill(tmp_batch, tmp_result)
+
+                # Log requests completing processing
+                if tmp_batch.reqs:
+                    for req in tmp_batch.reqs:
+                        log_request_flow(
+                            req,
+                            "Processing",
+                            "exiting",
+                            "Batch processing completed (overlap mode - previous batch)",
+                        )
 
             if len(self.disagg_prefill_inflight_queue) > 0:
                 self.process_disagg_prefill_inflight_queue()
@@ -420,6 +559,15 @@ class SchedulerDisaggregationPrefillMixin:
                 req.output_ids.append(next_token_id)
                 self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
                 self.disagg_prefill_inflight_queue.append(req)
+
+                # Log request moving to inflight queue
+                log_request_flow(
+                    req,
+                    "InflightQueue",
+                    "entering",
+                    "Prefill completed, KV transfer started (from previous batch)",
+                )
+
                 if logits_output.hidden_states is not None:
                     last_hidden_index = (
                         hidden_state_offset + extend_input_len_per_req[i] - 1
@@ -499,6 +647,13 @@ class SchedulerDisaggregationPrefillMixin:
         if len(self.disagg_prefill_inflight_queue) == 0:
             return []
 
+        # Log inflight queue status
+        log_queue_status(
+            "InflightQueue",
+            len(self.disagg_prefill_inflight_queue),
+            [req.rid for req in self.disagg_prefill_inflight_queue],
+        )
+
         done_reqs = []
 
         polls = poll_and_all_reduce(
@@ -520,6 +675,14 @@ class SchedulerDisaggregationPrefillMixin:
             if poll in [KVPoll.WaitingForInput, KVPoll.Transferring]:
                 undone_reqs.append(req)
             elif poll == KVPoll.Success:  # transfer done
+                # Log successful completion
+                log_request_flow(
+                    req,
+                    "InflightQueue",
+                    "exiting",
+                    "KV transfer completed successfully",
+                )
+
                 self.tree_cache.cache_finished_req(req)  # unlock the tree
                 req.finished_reason = FINISH_LENGTH(length=0)
                 # FIXME: clean up req's data in transfer engine
@@ -533,6 +696,12 @@ class SchedulerDisaggregationPrefillMixin:
                 except Exception as e:
                     error_message += f" with exception {e}"
                 logger.warning(error_message)
+
+                # Log transfer failure
+                log_request_flow(
+                    req, "InflightQueue", "failed", f"Transfer failed: {error_message}"
+                )
+
                 self.tree_cache.cache_finished_req(req)  # unlock the tree
                 prepare_abort(
                     req, error_message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR
@@ -547,7 +716,12 @@ class SchedulerDisaggregationPrefillMixin:
             any(req.return_logprob for req in done_reqs),
             None,
         )
+
+        # Log completion of requests
         for req in done_reqs:
+            log_request_flow(
+                req, "PrefillServer", "exiting", "Request completed and response sent"
+            )
             req: Req
             self.req_to_metadata_buffer_idx_allocator.free(req.metadata_buffer_index)
             req.metadata_buffer_index = -1

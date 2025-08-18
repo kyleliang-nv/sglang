@@ -115,6 +115,7 @@ class ServerArgs:
     log_level_http: Optional[str] = None
     log_requests: bool = False
     log_requests_level: int = 2
+    enable_prefill_request_flow_logging: bool = False
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
@@ -154,8 +155,8 @@ class ServerArgs:
     # LoRA
     enable_lora: Optional[bool] = None
     max_lora_rank: Optional[int] = None
-    lora_target_modules: Optional[Union[set[str], List[str]]] = None
-    lora_paths: Optional[Union[dict[str, str], dict[str, LoRARef], List[str]]] = None
+    lora_target_modules: Optional[Union[set, List[str]]] = None
+    lora_paths: Optional[Union[dict, List[str]]] = None
     max_loaded_loras: Optional[int] = None
     max_loras_per_batch: int = 8
     lora_backend: str = "triton"
@@ -569,8 +570,10 @@ class ServerArgs:
             self.expert_distribution_recorder_mode = "stat"
 
         if self.expert_distribution_recorder_buffer_size is None:
-            if (x := self.eplb_rebalance_num_iterations) is not None:
-                self.expert_distribution_recorder_buffer_size = x
+            if self.eplb_rebalance_num_iterations is not None:
+                self.expert_distribution_recorder_buffer_size = (
+                    self.eplb_rebalance_num_iterations
+                )
             elif self.expert_distribution_recorder_mode is not None:
                 self.expert_distribution_recorder_buffer_size = 1000
 
@@ -1105,6 +1108,12 @@ class ServerArgs:
             choices=[0, 1, 2, 3],
         )
         parser.add_argument(
+            "--enable-prefill-request-flow-logging",
+            action="store_true",
+            default=ServerArgs.enable_prefill_request_flow_logging,
+            help="Enable detailed request flow logging for prefill server. Shows how requests move through different stages (bootstrap, waiting, processing, inflight).",
+        )
+        parser.add_argument(
             "--crash-dump-folder",
             type=str,
             default=ServerArgs.crash_dump_folder,
@@ -1634,7 +1643,7 @@ class ServerArgs:
         parser.add_argument(
             "--ds-heavy-channel-type",
             type=str,
-            default=ServerArgs.ds_heavy_channel_type,
+            default=ServerArgs.ds_heavy_channel_num,
             help="The type of heavy channels in double sparsity attention",
         )
         parser.add_argument(
@@ -2294,7 +2303,7 @@ class PortArgs:
             port_base = int(dist_init_port) + 1
             detokenizer_port = port_base + 1
             rpc_port = port_base + 2
-            metrics_ipc_name = port_base + 3
+            metrics_port = port_base + 3
             if dp_rank is None:
                 # TokenizerManager to DataParallelController
                 scheduler_input_port = port_base + 4
@@ -2307,7 +2316,7 @@ class PortArgs:
                 detokenizer_ipc_name=f"tcp://{dist_init_host}:{detokenizer_port}",
                 nccl_port=nccl_port,
                 rpc_ipc_name=f"tcp://{dist_init_host}:{rpc_port}",
-                metrics_ipc_name=f"tcp://{dist_init_host}:{metrics_ipc_name}",
+                metrics_ipc_name=f"tcp://{dist_init_host}:{metrics_port}",
             )
 
 
