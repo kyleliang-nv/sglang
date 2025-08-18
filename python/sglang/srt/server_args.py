@@ -116,6 +116,17 @@ class ServerArgs:
     log_requests: bool = False
     log_requests_level: int = 2
     enable_prefill_request_flow_logging: bool = False
+    enable_detokenizer_logging: bool = False
+    detokenizer_log_interval: int = 100
+    enable_bootstrap_logging: bool = False
+    enable_detokenizer_coordination_logging: bool = False
+
+    # Multi-process DetokenizerManager configuration
+    detokenizer_processes: int = 1  # Number of DetokenizerManager processes
+    detokenizer_load_balance_policy: str = (
+        "round_robin"  # round_robin, least_loaded, weighted
+    )
+
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
@@ -1113,6 +1124,44 @@ class ServerArgs:
             default=ServerArgs.enable_prefill_request_flow_logging,
             help="Enable detailed request flow logging for prefill server. Shows how requests move through different stages (bootstrap, waiting, processing, inflight).",
         )
+        parser.add_argument(
+            "--enable-detokenizer-logging",
+            action="store_true",
+            default=ServerArgs.enable_detokenizer_logging,
+            help="Enable detailed performance logging for detokenizer. Shows queue sizes, processing latency, throughput, and bottleneck detection.",
+        )
+        parser.add_argument(
+            "--detokenizer-log-interval",
+            type=int,
+            default=ServerArgs.detokenizer_log_interval,
+            help="Log detokenizer performance stats every N requests (default: 100).",
+        )
+        parser.add_argument(
+            "--enable-bootstrap-logging",
+            action="store_true",
+            default=ServerArgs.enable_bootstrap_logging,
+            help="Enable detailed bootstrap and queue transition logging. Shows request movement through prealloc, transfer, and other queues (default: disabled).",
+        )
+        parser.add_argument(
+            "--enable-detokenizer-coordination-logging",
+            action="store_true",
+            default=ServerArgs.enable_detokenizer_coordination_logging,
+            help="Enable detailed logging for multi-process DetokenizerManager coordination. Shows request routing, load balancing decisions, and inter-process communication (default: disabled).",
+        )
+        parser.add_argument(
+            "--detokenizer-processes",
+            type=int,
+            default=ServerArgs.detokenizer_processes,
+            help="Number of DetokenizerManager processes to run in parallel (default: 1).",
+        )
+        parser.add_argument(
+            "--detokenizer-load-balance-policy",
+            type=str,
+            default=ServerArgs.detokenizer_load_balance_policy,
+            choices=["round_robin", "least_loaded", "weighted"],
+            help="Load balancing policy for multi-process DetokenizerManager: round_robin, least_loaded, or weighted (default: round_robin).",
+        )
+
         parser.add_argument(
             "--crash-dump-folder",
             type=str,
@@ -2252,6 +2301,12 @@ class PortArgs:
     # The ipc filename for detokenizer to receive inputs from scheduler (zmq)
     detokenizer_ipc_name: str
 
+    # Multiple detokenizer process support
+    detokenizer_ipc_names: List[
+        str
+    ]  # List of IPC names for each DetokenizerManager process
+    detokenizer_coordinator_ipc_name: str  # Coordinator for receiving from scheduler
+
     # The port for nccl initialization (torch.dist)
     nccl_port: int
 
@@ -2277,10 +2332,30 @@ class PortArgs:
 
         if not server_args.enable_dp_attention:
             # Normal case, use IPC within a single node
+            # Create IPC names for multiple detokenizer processes if configured
+            detokenizer_ipc_names = []
+            if server_args.detokenizer_processes > 1:
+                for i in range(server_args.detokenizer_processes):
+                    detokenizer_ipc_names.append(
+                        f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+                    )
+                detokenizer_coordinator_ipc_name = (
+                    f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+                )
+            else:
+                detokenizer_ipc_names = [
+                    f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+                ]
+                detokenizer_coordinator_ipc_name = (
+                    f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+                )
+
             return PortArgs(
                 tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                detokenizer_ipc_names=detokenizer_ipc_names,
+                detokenizer_coordinator_ipc_name=detokenizer_coordinator_ipc_name,
                 nccl_port=nccl_port,
                 rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 metrics_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
@@ -2308,12 +2383,37 @@ class PortArgs:
                 # TokenizerManager to DataParallelController
                 scheduler_input_port = port_base + 4
             else:
-                scheduler_input_port = port_base + 4 + 1 + dp_rank
+                scheduler_input_port = port_base + 5 + dp_rank
+
+            # Create TCP addresses for multiple detokenizer processes if configured
+            detokenizer_ipc_names = []
+            if server_args.detokenizer_processes > 1:
+                logger.info(f"🔌 Multi-process detokenizer port allocation:")
+                logger.info(f"  Base port: {port_base}")
+                logger.info(
+                    f"  Detokenizer processes: {[port_base + 100 + i for i in range(server_args.detokenizer_processes)]}"
+                )
+                logger.info(
+                    f"  Coordinator: {port_base + 200 + server_args.detokenizer_processes}"
+                )
+
+                for i in range(server_args.detokenizer_processes):
+                    detokenizer_ipc_names.append(
+                        f"tcp://{dist_init_host}:{port_base + 100 + i}"
+                    )
+                detokenizer_coordinator_ipc_name = f"tcp://{dist_init_host}:{port_base + 200 + server_args.detokenizer_processes}"
+            else:
+                detokenizer_ipc_names = [f"tcp://{dist_init_host}:{detokenizer_port}"]
+                detokenizer_coordinator_ipc_name = (
+                    f"tcp://{dist_init_host}:{detokenizer_port}"
+                )
 
             return PortArgs(
                 tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base}",
                 scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port}",
                 detokenizer_ipc_name=f"tcp://{dist_init_host}:{detokenizer_port}",
+                detokenizer_ipc_names=detokenizer_ipc_names,
+                detokenizer_coordinator_ipc_name=detokenizer_coordinator_ipc_name,
                 nccl_port=nccl_port,
                 rpc_ipc_name=f"tcp://{dist_init_host}:{rpc_port}",
                 metrics_ipc_name=f"tcp://{dist_init_host}:{metrics_port}",

@@ -282,6 +282,15 @@ Please consult the documentation below and [server_args.py](https://github.com/s
 | `--enable-return-hidden-states` | Enable returning hidden states. | False |
 | `--enable-triton-kernel-moe` | Enable Triton kernel for MoE. | False |
 
+## Detokenizer configuration
+
+| Arguments | Description | Defaults |
+|-----------|-------------|----------|
+| `--detokenizer-processes` | Number of DetokenizerManager processes to run in parallel for improved throughput. | 1 |
+| `--detokenizer-load-balance-policy` | Load balancing policy for multi-process DetokenizerManager: "round_robin", "least_loaded", or "weighted". | round_robin |
+
+| `--detokenizer-log-interval` | Log detokenizer performance stats every N requests. | 100 |
+
 ## Debug tensor dumps
 
 | Arguments | Description | Defaults |

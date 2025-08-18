@@ -280,10 +280,20 @@ class Scheduler(
                     context, zmq.PUSH, port_args.tokenizer_ipc_name, False
                 )
             else:
-                # Send to the DetokenizerManager
-                self.send_to_detokenizer = get_zmq_socket(
-                    context, zmq.PUSH, port_args.detokenizer_ipc_name, False
-                )
+                # Send to the DetokenizerManager or DetokenizerCoordinator based on mode
+                if server_args.detokenizer_processes > 1:
+                    # Multi-process mode: send to coordinator
+                    self.send_to_detokenizer = get_zmq_socket(
+                        context,
+                        zmq.PUSH,
+                        port_args.detokenizer_coordinator_ipc_name,
+                        False,
+                    )
+                else:
+                    # Single process mode: send directly to DetokenizerManager
+                    self.send_to_detokenizer = get_zmq_socket(
+                        context, zmq.PUSH, port_args.detokenizer_ipc_name, False
+                    )
 
             if self.server_args.sleep_on_idle:
                 self.idle_sleeper = IdleSleeper(

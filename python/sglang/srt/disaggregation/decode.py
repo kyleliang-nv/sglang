@@ -496,7 +496,10 @@ class DecodePreallocQueue:
 
         if is_retracted:
             self.retracted_queue.append(req)
-            logger.info(f"Request {req.rid} added to retracted queue")
+            if hasattr(self.scheduler, "server_args") and getattr(
+                self.scheduler.server_args, "enable_bootstrap_logging", False
+            ):
+                logger.info(f"Request {req.rid} added to retracted queue")
         else:
             if req.bootstrap_host == FAKE_BOOTSTRAP_HOST:
                 kv_receiver_class = get_kv_class(
@@ -520,18 +523,29 @@ class DecodePreallocQueue:
 
             # Set prealloc entry time
             decode_req.prealloc_entry_time = time.time()
-            logger.info(
-                f"Request {req.rid} entered prealloc queue at {decode_req.prealloc_entry_time:.3f}s"
-            )
+            if hasattr(self.scheduler, "server_args") and getattr(
+                self.scheduler.server_args, "enable_bootstrap_logging", False
+            ):
+                logger.info(
+                    f"Request {req.rid} entered prealloc queue at {decode_req.prealloc_entry_time:.3f}s"
+                )
 
             self.queue.append(decode_req)
 
             # Start parallel bootstrap if not fake
             if req.bootstrap_host != FAKE_BOOTSTRAP_HOST:
-                logger.info(f"Starting bootstrap for request {req.rid}")
+                if hasattr(self.scheduler, "server_args") and getattr(
+                    self.scheduler.server_args, "enable_bootstrap_logging", False
+                ):
+                    logger.info(f"Starting bootstrap for request {req.rid}")
                 self._schedule_bootstrap(decode_req)
             else:
-                logger.info(f"Request {req.rid} using fake bootstrap, marked as ready")
+                if hasattr(self.scheduler, "server_args") and getattr(
+                    self.scheduler.server_args, "enable_bootstrap_logging", False
+                ):
+                    logger.info(
+                        f"Request {req.rid} using fake bootstrap, marked as ready"
+                    )
                 decode_req.waiting_for_input = True
 
     def _schedule_bootstrap(self, decode_req: DecodeRequest):
@@ -774,9 +788,12 @@ class DecodePreallocQueue:
             prealloc_duration = (
                 decode_req.transfer_entry_time - decode_req.prealloc_entry_time
             )
-            logger.info(
-                f"Request {decode_req.req.rid} moved to transfer queue after {prealloc_duration:.3f}s in prealloc"
-            )
+            if hasattr(self.scheduler, "server_args") and getattr(
+                self.scheduler.server_args, "enable_bootstrap_logging", False
+            ):
+                logger.info(
+                    f"Request {decode_req.req.rid} moved to transfer queue after {prealloc_duration:.3f}s in prealloc"
+                )
 
             preallocated_reqs.append(decode_req)
             indices_to_remove.add(i)
@@ -954,14 +971,20 @@ class DecodeTransferQueue:
 
     def add(self, decode_req: DecodeRequest) -> None:
         self.queue.append(decode_req)
-        logger.info(f"Request {decode_req.req.rid} entered transfer queue")
+        if hasattr(self.scheduler, "server_args") and getattr(
+            self.scheduler.server_args, "enable_bootstrap_logging", False
+        ):
+            logger.info(f"Request {decode_req.req.rid} entered transfer queue")
 
     def extend(self, decode_reqs: List[DecodeRequest]) -> None:
         self.queue.extend(decode_reqs)
         for decode_req in decode_reqs:
-            logger.info(
-                f"Request {decode_req.req.rid} entered transfer queue (via extend)"
-            )
+            if hasattr(self.scheduler, "server_args") and getattr(
+                self.scheduler.server_args, "enable_bootstrap_logging", False
+            ):
+                logger.info(
+                    f"Request {decode_req.req.rid} entered transfer queue (via extend)"
+                )
 
     def pop_transferred(self) -> List[Req]:
         if not self.queue:
@@ -1030,9 +1053,12 @@ class DecodeTransferQueue:
 
                 # Log successful KV transfer
                 transfer_duration = time.time() - decode_req.transfer_entry_time
-                logger.info(
-                    f"Request {decode_req.req.rid} KV transfer completed in {transfer_duration:.3f}s"
-                )
+                if hasattr(self.scheduler, "server_args") and getattr(
+                    self.scheduler.server_args, "enable_bootstrap_logging", False
+                ):
+                    logger.info(
+                        f"Request {decode_req.req.rid} KV transfer completed in {transfer_duration:.3f}s"
+                    )
 
                 # special handling for sampling_params.max_new_tokens == 1
                 if decode_req.req.sampling_params.max_new_tokens == 1:
@@ -1047,9 +1073,12 @@ class DecodeTransferQueue:
                     self.scheduler.log_request_completion_summary(decode_req.req)
                 else:
                     transferred_reqs.append(decode_req.req)
-                    logger.info(
-                        f"Request {decode_req.req.rid} moved to waiting queue after successful KV transfer"
-                    )
+                    if hasattr(self.scheduler, "server_args") and getattr(
+                        self.scheduler.server_args, "enable_bootstrap_logging", False
+                    ):
+                        logger.info(
+                            f"Request {decode_req.req.rid} moved to waiting queue after successful KV transfer"
+                        )
 
                 indices_to_remove.add(i)
             elif poll in [
@@ -1377,19 +1406,28 @@ class SchedulerDisaggregationDecodeMixin:
                         total_time_to_waiting = (
                             req.waiting_entry_time - req.prealloc_entry_time
                         )
-                        logger.info(
-                            f"⏳ Request {req.rid} entered waiting queue after {total_time_to_waiting:.3f}s total time"
-                        )
+                        if hasattr(self, "server_args") and getattr(
+                            self.server_args, "enable_bootstrap_logging", False
+                        ):
+                            logger.info(
+                                f"⏳ Request {req.rid} entered waiting queue after {total_time_to_waiting:.3f}s total time"
+                            )
                     else:
-                        logger.info(
-                            f"⏳ Request {req.rid} entered waiting queue (no prealloc timing available)"
-                        )
+                        if hasattr(self, "server_args") and getattr(
+                            self.server_args, "enable_bootstrap_logging", False
+                        ):
+                            logger.info(
+                                f"⏳ Request {req.rid} entered waiting queue (no prealloc timing available)"
+                            )
                 else:
                     logger.warning(f"Invalid request object in alloc_reqs: {req}")
 
-            logger.info(
-                f"Added {len(alloc_reqs)} requests to waiting queue (total: {len(self.waiting_queue)})"
-            )
+            if hasattr(self, "server_args") and getattr(
+                self.server_args, "enable_bootstrap_logging", False
+            ):
+                logger.info(
+                    f"Added {len(alloc_reqs)} requests to waiting queue (total: {len(self.waiting_queue)})"
+                )
 
     def log_request_completion_summary(self: "Scheduler", req: Req):
         """Log a complete summary of a request's lifecycle when it finishes."""
@@ -1439,38 +1477,43 @@ class SchedulerDisaggregationDecodeMixin:
             total_duration = completion_time - timing_info["prealloc_entry"]
 
         # Log the complete lifecycle summary
-        logger.info(f"🎯 REQUEST {req.rid} COMPLETION SUMMARY:")
+        if hasattr(self, "server_args") and getattr(
+            self.server_args, "enable_bootstrap_logging", False
+        ):
+            logger.info(f"🎯 REQUEST {req.rid} COMPLETION SUMMARY:")
 
-        if total_duration is not None:
-            logger.info(f"   • Total time: {total_duration:.3f}s")
-        else:
-            logger.info(f"   • Total time: Unknown (incomplete timing data)")
-
-        if stage_durations:
-            logger.info(f"   • Stage breakdown:")
-            for stage, duration in stage_durations.items():
-                if duration is not None:
-                    logger.info(f"     - {stage.capitalize()}: {duration:.3f}s")
-                else:
-                    logger.info(f"     - {stage.capitalize()}: Unknown")
-        else:
-            logger.info(f"   • Stage breakdown: Insufficient timing data")
-
-        # Log output information
-        if hasattr(req, "output_ids") and req.output_ids:
-            output_len = len(req.output_ids)
-            logger.info(f"   • Generated {output_len} tokens successfully")
-
-            # Calculate throughput
-            if total_duration and total_duration > 0:
-                tokens_per_second = output_len / total_duration
-                logger.info(f"   • Throughput: {tokens_per_second:.2f} tokens/second")
+            if total_duration is not None:
+                logger.info(f"   • Total time: {total_duration:.3f}s")
             else:
-                logger.info(f"   • Throughput: Unknown (insufficient timing data)")
-        else:
-            logger.warning(f"   • ⚠️ No output tokens generated")
+                logger.info(f"   • Total time: Unknown (incomplete timing data)")
 
-        logger.info(f"   • Request {req.rid} lifecycle complete")
+            if stage_durations:
+                logger.info(f"   • Stage breakdown:")
+                for stage, duration in stage_durations.items():
+                    if duration is not None:
+                        logger.info(f"     - {stage.capitalize()}: {duration:.3f}s")
+                    else:
+                        logger.info(f"     - {stage.capitalize()}: Unknown")
+            else:
+                logger.info(f"   • Stage breakdown: Insufficient timing data")
+
+            # Log output information
+            if hasattr(req, "output_ids") and req.output_ids:
+                output_len = len(req.output_ids)
+                logger.info(f"   • Generated {output_len} tokens successfully")
+
+                # Calculate throughput
+                if total_duration and total_duration > 0:
+                    tokens_per_second = output_len / total_duration
+                    logger.info(
+                        f"   • Throughput: {tokens_per_second:.2f} tokens/second"
+                    )
+                else:
+                    logger.info(f"   • Throughput: Unknown (insufficient timing data)")
+            else:
+                logger.warning(f"   • ⚠️ No output tokens generated")
+
+            logger.info(f"   • Request {req.rid} lifecycle complete")
 
     def process_batch_result(self: "Scheduler", batch: ScheduleBatch, result):
         """Process batch results and track request completion."""
@@ -1618,6 +1661,11 @@ class SchedulerDisaggregationDecodeMixin:
 
     def log_detailed_request_status(self: "Scheduler"):
         """Log detailed request status for debugging."""
+        if not hasattr(self, "server_args") or not getattr(
+            self.server_args, "enable_bootstrap_logging", False
+        ):
+            return
+
         tracking_info = self.get_request_tracking_info()
         logger.info("=== Detailed Request Status ===")
         for queue_name, requests in tracking_info.items():

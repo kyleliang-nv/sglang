@@ -41,7 +41,10 @@ from sglang.srt.entrypoints.EngineBase import EngineBase
 from sglang.srt.managers.data_parallel_controller import (
     run_data_parallel_controller_process,
 )
-from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
+from sglang.srt.managers.detokenizer_manager import (
+    run_detokenizer_coordinator_process,
+    run_detokenizer_process,
+)
 from sglang.srt.managers.io_struct import (
     EmbeddingReqInput,
     GenerateReqInput,
@@ -780,15 +783,42 @@ def _launch_subprocesses(
             )
         return None, None, None
 
-    # Launch detokenizer process
-    detoken_proc = mp.Process(
-        target=run_detokenizer_process,
-        args=(
-            server_args,
-            port_args,
-        ),
-    )
-    detoken_proc.start()
+    # Launch detokenizer process(es)
+    detoken_procs = []
+    if server_args.detokenizer_processes > 1:
+        # Launch DetokenizerCoordinator first
+        coordinator_proc = mp.Process(
+            target=run_detokenizer_coordinator_process,
+            args=(server_args, port_args),
+        )
+        coordinator_proc.start()
+        detoken_procs.append(coordinator_proc)
+        logger.info(
+            f"Launched DetokenizerCoordinator process (PID: {coordinator_proc.pid})"
+        )
+
+        # Launch multiple DetokenizerManager processes
+        for i in range(server_args.detokenizer_processes):
+            detoken_proc = mp.Process(
+                target=run_detokenizer_process,
+                args=(server_args, port_args, i),  # Pass process_id
+            )
+            detoken_proc.start()
+            detoken_procs.append(detoken_proc)
+            logger.info(
+                f"Launched DetokenizerManager process {i} (PID: {detoken_proc.pid})"
+            )
+    else:
+        # Single DetokenizerManager (existing behavior)
+        detoken_proc = mp.Process(
+            target=run_detokenizer_process,
+            args=(server_args, port_args, 0),
+        )
+        detoken_proc.start()
+        detoken_procs.append(detoken_proc)
+        logger.info(
+            f"Launched single DetokenizerManager process (PID: {detoken_proc.pid})"
+        )
 
     # Launch tokenizer process
     tokenizer_manager = TokenizerManager(server_args, port_args)
