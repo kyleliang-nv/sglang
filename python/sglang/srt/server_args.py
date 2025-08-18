@@ -1105,6 +1105,12 @@ class ServerArgs:
             choices=[0, 1, 2, 3],
         )
         parser.add_argument(
+            "--enable-prefill-request-flow-logging",
+            action="store_true",
+            default=ServerArgs.enable_prefill_request_flow_logging,
+            help="Enable detailed request flow logging for prefill server. Shows how requests move through different stages (bootstrap, waiting, processing, inflight).",
+        )
+        parser.add_argument(
             "--crash-dump-folder",
             type=str,
             default=ServerArgs.crash_dump_folder,
