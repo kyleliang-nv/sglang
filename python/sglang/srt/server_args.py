@@ -2303,7 +2303,7 @@ class PortArgs:
             port_base = int(dist_init_port) + 1
             detokenizer_port = port_base + 1
             rpc_port = port_base + 2
-            metrics_ipc_name = port_base + 3
+            metrics_port = port_base + 3
             if dp_rank is None:
                 # TokenizerManager to DataParallelController
                 scheduler_input_port = port_base + 4
@@ -2313,10 +2313,10 @@ class PortArgs:
             return PortArgs(
                 tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base}",
                 scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port}",
-                detokenizer_ipc_name=f"tcp://{tempfile.NamedTemporaryFile(delete=False).name}",
+                detokenizer_ipc_name=f"tcp://{dist_init_host}:{detokenizer_port}",
                 nccl_port=nccl_port,
                 rpc_ipc_name=f"tcp://{dist_init_host}:{rpc_port}",
-                metrics_ipc_name=f"tcp://{dist_init_host}:{metrics_ipc_name}",
+                metrics_ipc_name=f"tcp://{dist_init_host}:{metrics_port}",
             )
 
 
@@ -2332,11 +2332,6 @@ class LoRAPathAction(argparse.Action):
 
 
 class DeprecatedAction(argparse.Action):
-    def __init__(self, option_strings, dest, nargs=0, **kwargs):
-        super(DeprecatedAction, self).__init__(
-            option_strings, dest, nargs=nargs, **kwargs
-        )
-
     def __init__(self, option_strings, dest, nargs=0, **kwargs):
         super(DeprecatedAction, self).__init__(
             option_strings, dest, nargs=nargs, **kwargs
