@@ -725,7 +725,9 @@ def _launch_subprocesses(
                 else "5759"
             )
             base_port = int(tcp_port) if tcp_port.isdigit() else 5759
-            worker_port = base_port + i + 1  # Increment port for each worker
+            worker_port = (
+                base_port + (i * 10) + 1
+            )  # Use larger increments (10, 20, 30...) to avoid conflicts
 
             # Get the host from the main port args or use localhost
             host = (
