@@ -14,24 +14,15 @@
 """DetokenizerLoadBalancer distributes work among multiple detokenizer workers."""
 
 import logging
-import random
-import threading
 import time
-from collections import defaultdict
 from typing import Dict, List, Optional, Set
 
 import zmq
 
-from sglang.srt.managers.base_manager import BaseManager
-from sglang.srt.managers.io_struct import BatchEmbeddingOut, BatchTokenIDOut
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.srt_py_object import SrtPyObject
-from sglang.srt.utils import get_scheduler_manager
-
 logger = logging.getLogger(__name__)
 
 
-class DetokenizerLoadBalancer(BaseManager):
+class DetokenizerLoadBalancer:
     """Load balancer for distributing detokenization work across multiple workers."""
 
     def __init__(
@@ -41,7 +32,8 @@ class DetokenizerLoadBalancer(BaseManager):
         detokenizer_port_args_list,
         worker_id: int = 0,
     ):
-        super().__init__(server_args, port_args)
+        self.server_args = server_args
+        self.port_args = port_args
         self.worker_id = worker_id
         self.detokenizer_port_args_list = detokenizer_port_args_list
         self.num_workers = len(detokenizer_port_args_list)
@@ -80,29 +72,28 @@ class DetokenizerLoadBalancer(BaseManager):
             f"🔌 DetokenizerLoadBalancer {self.worker_id} connecting to {self.num_workers} workers..."
         )
 
+        # Initialize ZMQ context
+        context = zmq.Context()
+
         successful_connections = 0
         for i, port_args in enumerate(self.detokenizer_port_args_list):
             worker_start = time.time()
             try:
-                # Connect to worker
-                from sglang.srt.utils import get_detokenizer_manager
+                # Create PUSH socket to send work to this worker
+                socket = context.socket(zmq.PUSH)
+                socket.connect(port_args.detokenizer_ipc_name)
 
-                worker = get_detokenizer_manager(port_args)
+                # Set high water mark to prevent memory issues
+                socket.setsockopt(zmq.SNDHWM, 1000)
 
-                # Test connection
-                test_start = time.time()
-                # Note: We can't actually test send/recv here without breaking the flow
-                # Just mark as connected for now
-                test_time = time.time() - test_start
-
-                self.workers[i] = worker
+                self.workers[i] = socket
                 self.worker_stats["status"][i] = "connected"
                 successful_connections += 1
 
                 worker_time = time.time() - worker_start
                 logger.info(
                     f"🔌 Connected to detokenizer worker {i} at {port_args.detokenizer_ipc_name} "
-                    f"in {worker_time:.4f}s (test: {test_time:.4f}s)"
+                    f"in {worker_time:.4f}s"
                 )
 
             except Exception as e:
@@ -122,7 +113,7 @@ class DetokenizerLoadBalancer(BaseManager):
         if successful_connections == 0:
             raise RuntimeError("No detokenizer workers could be connected")
 
-    def send_pyobj(self, data: SrtPyObject):
+    def send_pyobj(self, data: object):
         """Send data to the appropriate worker based on load balancing."""
         start_time = time.time()
         logger.info(
@@ -142,7 +133,7 @@ class DetokenizerLoadBalancer(BaseManager):
         # Time the actual send operation
         send_start = time.time()
         try:
-            result = self.send_to_worker(worker_id, data)
+            self.send_to_worker(worker_id, data)
             send_time = time.time() - send_start
             total_time = time.time() - start_time
 
@@ -160,8 +151,6 @@ class DetokenizerLoadBalancer(BaseManager):
                 f"   - Request IDs: {request_ids[:3]}{'...' if len(request_ids) > 3 else ''}"
             )
 
-            return result
-
         except Exception as e:
             send_time = time.time() - send_start
             total_time = time.time() - start_time
@@ -177,7 +166,7 @@ class DetokenizerLoadBalancer(BaseManager):
             )
             raise
 
-    def _extract_request_ids(self, data: SrtPyObject) -> List[str]:
+    def _extract_request_ids(self, data: object) -> List[str]:
         """Extract request IDs from the data."""
         start_time = time.time()
 
@@ -252,7 +241,7 @@ class DetokenizerLoadBalancer(BaseManager):
 
         return worker_id
 
-    def send_to_worker(self, worker_id: int, data: SrtPyObject):
+    def send_to_worker(self, worker_id: int, data: object):
         """Send data to a specific worker."""
         start_time = time.time()
 
@@ -260,12 +249,11 @@ class DetokenizerLoadBalancer(BaseManager):
             raise ValueError(f"Invalid worker ID: {worker_id}")
 
         try:
-            # Send to worker
-            result = self.workers[worker_id].send_pyobj(data)
+            # Send to worker using ZMQ socket
+            self.workers[worker_id].send_pyobj(data)
             send_time = time.time() - start_time
 
             logger.debug(f"📤 Sent to worker {worker_id} in {send_time:.4f}s")
-            return result
 
         except Exception as e:
             send_time = time.time() - start_time

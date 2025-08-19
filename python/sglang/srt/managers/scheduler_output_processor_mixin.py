@@ -5,16 +5,9 @@ import threading
 import time
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
-from sglang.srt.disaggregation.utils import DisaggregationMode
-from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from sglang.srt.managers.base_manager import BaseManager
-from sglang.srt.managers.detokenizer_load_balancer import DetokenizerLoadBalancer
-from sglang.srt.managers.detokenizer_manager import DetokenizerManager
 from sglang.srt.managers.io_struct import AbortReq, BatchEmbeddingOut, BatchTokenIDOut
 from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
-from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.srt_py_object import SrtPyObject
-from sglang.srt.utils import get_detokenizer_manager
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import (
@@ -29,11 +22,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_FORCE_STREAM_INTERVAL = 50
 
 
-class SchedulerOutputProcessorMixin(BaseManager):
-    """
-    This class implements the output processing logic for Scheduler.
-    We put them into a separate file to make the `scheduler.py` shorter.
-    """
+class SchedulerOutputProcessorMixin:
+    """Mixin for processing scheduler output."""
 
     def process_batch_result_prefill(
         self: Scheduler,

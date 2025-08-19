@@ -26,7 +26,6 @@ import setproctitle
 import zmq
 
 from sglang.srt.hf_transformers_utils import get_tokenizer
-from sglang.srt.managers.base_manager import BaseManager
 from sglang.srt.managers.io_struct import (
     BatchEmbeddingOut,
     BatchMultimodalDecodeReq,
@@ -38,7 +37,6 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.srt_py_object import SrtPyObject
 from sglang.srt.utils import (
     configure_logger,
-    get_scheduler_manager,
     get_zmq_socket,
     kill_itself_when_parent_died,
 )
@@ -69,7 +67,7 @@ class DecodeStatus:
     sent_offset: int = 0
 
 
-class DetokenizerManager(BaseManager):
+class DetokenizerManager:
     """Manager for detokenization process."""
 
     def __init__(
@@ -78,7 +76,8 @@ class DetokenizerManager(BaseManager):
         port_args,
         worker_id: int = 0,
     ):
-        super().__init__(server_args, port_args)
+        self.server_args = server_args
+        self.port_args = port_args
         self.worker_id = worker_id
         self.scheduler_manager = None
         logger.info(f"🔧 DetokenizerManager {worker_id} initialized")
@@ -90,7 +89,16 @@ class DetokenizerManager(BaseManager):
 
         # Time the scheduler connection
         scheduler_start = time.time()
-        self.scheduler_manager = get_scheduler_manager(self.port_args)
+
+        # Initialize ZMQ context and sockets
+        context = zmq.Context(2)
+        self.recv_from_scheduler = get_zmq_socket(
+            context, zmq.PULL, self.port_args.detokenizer_ipc_name, True
+        )
+        self.send_to_scheduler = get_zmq_socket(
+            context, zmq.PUSH, self.port_args.scheduler_input_ipc_name, False
+        )
+
         scheduler_time = time.time() - scheduler_start
         logger.info(
             f"🔌 DetokenizerManager {self.worker_id} connected to scheduler in {scheduler_time:.4f}s"
@@ -104,7 +112,7 @@ class DetokenizerManager(BaseManager):
 
                 # Time the receive operation
                 receive_start = time.time()
-                data = self.scheduler_manager.recv_pyobj()
+                data = self.recv_from_scheduler.recv_pyobj()
                 receive_time = time.time() - receive_start
 
                 if data is None:
@@ -178,7 +186,7 @@ class DetokenizerManager(BaseManager):
         # Time the response sending
         send_start = time.time()
         try:
-            self.scheduler_manager.send_pyobj(output)
+            self.send_to_scheduler.send_pyobj(output)
             send_time = time.time() - send_start
             total_time = time.time() - start_time
 
