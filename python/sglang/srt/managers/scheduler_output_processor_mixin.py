@@ -7,8 +7,14 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+from sglang.srt.managers.base_manager import BaseManager
+from sglang.srt.managers.detokenizer_load_balancer import DetokenizerLoadBalancer
+from sglang.srt.managers.detokenizer_manager import DetokenizerManager
 from sglang.srt.managers.io_struct import AbortReq, BatchEmbeddingOut, BatchTokenIDOut
 from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
+from sglang.srt.managers.scheduler import Scheduler
+from sglang.srt.srt_py_object import SrtPyObject
+from sglang.srt.utils import get_detokenizer_manager
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import (
@@ -23,7 +29,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_FORCE_STREAM_INTERVAL = 50
 
 
-class SchedulerOutputProcessorMixin:
+class SchedulerOutputProcessorMixin(BaseManager):
     """
     This class implements the output processing logic for Scheduler.
     We put them into a separate file to make the `scheduler.py` shorter.
@@ -197,26 +203,43 @@ class SchedulerOutputProcessorMixin:
         result: GenerationBatchResult,
         launch_done: Optional[threading.Event] = None,
     ):
+        start_time = time.time()
+        logger.debug(
+            f"🔤 Processing decode batch result for {len(batch.reqs)} requests"
+        )
+
+        # Time the result extraction
+        extract_start = time.time()
         logits_output, next_token_ids, can_run_cuda_graph = (
             result.logits_output,
             result.next_token_ids,
             result.can_run_cuda_graph,
         )
         self.num_generated_tokens += len(batch.reqs)
+        extract_time = time.time() - extract_start
 
         if self.enable_overlap:
+            # Time the overlap resolution
+            overlap_start = time.time()
             logits_output, next_token_ids, can_run_cuda_graph = (
                 self.tp_worker.resolve_last_batch_result(launch_done)
             )
             next_token_logprobs = logits_output.next_token_logprobs
+            overlap_time = time.time() - overlap_start
+            logger.debug(f"🔄 Overlap resolution completed in {overlap_time:.4f}s")
         elif batch.spec_algorithm.is_none():
             # spec decoding handles output logprobs inside verify process.
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:
                 next_token_logprobs = logits_output.next_token_logprobs.tolist()
 
+        # Time the memory pool operations
+        pool_start = time.time()
         self.token_to_kv_pool_allocator.free_group_begin()
+        pool_time = time.time() - pool_start
 
+        # Time the request processing loop
+        loop_start = time.time()
         # Check finish condition
         # NOTE: the length of reqs and next_token_ids don't match if it is spec decoding.
         # We should ignore using next_token_ids for spec decoding cases.
@@ -284,16 +307,31 @@ class SchedulerOutputProcessorMixin:
                     self.abort_request(AbortReq(req.rid))
                 req.grammar.finished = req.finished()
 
+        loop_time = time.time() - loop_start
+
+        # Time the output streaming
+        stream_start = time.time()
         self.set_next_batch_sampling_info_done(batch)
         self.stream_output(batch.reqs, batch.return_logprob)
+        stream_time = time.time() - stream_start
+
+        # Time the final cleanup
+        cleanup_start = time.time()
         self.token_to_kv_pool_allocator.free_group_end()
+        cleanup_time = time.time() - cleanup_start
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
-        if (
-            self.current_scheduler_metrics_enabled()
-            and self.forward_ct_decode % self.server_args.decode_log_interval == 0
-        ):
-            self.log_decode_stats(can_run_cuda_graph, running_batch=batch)
+
+        total_time = time.time() - start_time
+        logger.info(
+            f"✅ Decode batch result processing completed in {total_time:.4f}s:\n"
+            f"   - Result extraction: {extract_time:.4f}s\n"
+            f"   - Memory pool operations: {pool_time:.4f}s\n"
+            f"   - Request processing loop: {loop_time:.4f}s\n"
+            f"   - Output streaming: {stream_time:.4f}s\n"
+            f"   - Final cleanup: {cleanup_time:.4f}s\n"
+            f"   - Requests: {len(batch.reqs)}, Return logprob: {batch.return_logprob}"
+        )
 
     def add_input_logprob_return_values(
         self: Scheduler,
@@ -467,10 +505,26 @@ class SchedulerOutputProcessorMixin:
         skip_req: Optional[Req] = None,
     ):
         """Stream the output to detokenizer."""
+        start_time = time.time()
+        logger.debug(
+            f"📤 Starting stream_output for {len(reqs)} requests, return_logprob: {return_logprob}"
+        )
+
         if self.is_generation:
+            # Time generation streaming
+            gen_start = time.time()
             self.stream_output_generation(reqs, return_logprob, skip_req)
+            gen_time = time.time() - gen_start
+            logger.debug(f"🔤 Generation streaming completed in {gen_time:.4f}s")
         else:  # embedding or reward model
+            # Time embedding streaming
+            emb_start = time.time()
             self.stream_output_embedding(reqs)
+            emb_time = time.time() - emb_start
+            logger.debug(f"📊 Embedding streaming completed in {emb_time:.4f}s")
+
+        total_time = time.time() - start_time
+        logger.debug(f"✅ Stream output completed in {total_time:.4f}s")
 
     def stream_output_generation(
         self: Scheduler,
@@ -762,3 +816,136 @@ class SchedulerOutputProcessorMixin:
             logger.error(f"❌ Detokenizer type: {detokenizer_type}")
             logger.error(f"❌ Exception type: {type(e).__name__}")
             # Continue processing instead of crashing
+
+    def stream_output_generation(
+        self,
+        reqs: List["Req"],
+        rids: List[str],
+        output_ids: List[List[int]],
+        logprobs: List[List[float]],
+        finish_reasons: List[str],
+        return_logprob: bool = False,
+    ) -> None:
+        """Stream output generation results."""
+        start_time = time.time()
+        logger.info(
+            f"🚀 GPU completed, starting response processing for {len(reqs)} requests"
+        )
+
+        # Time the detokenizer interface check
+        detokenizer_check_start = time.time()
+        detokenizer_type = type(self.send_to_detokenizer).__name__
+        logger.info(f"🔍 Detokenizer interface type: {detokenizer_type}")
+        detokenizer_check_time = time.time() - detokenizer_check_start
+
+        # Time the data preparation
+        prep_start = time.time()
+        data = SrtPyObject(
+            rids=rids,
+            output_ids=output_ids,
+            logprobs=logprobs if return_logprob else None,
+            finish_reasons=finish_reasons,
+        )
+        prep_time = time.time() - prep_start
+
+        # Time the actual send operation
+        send_start = time.time()
+        try:
+            if hasattr(self.send_to_detokenizer, "send_pyobj"):
+                # Load balancer interface
+                logger.debug(f"🔀 Sending to detokenizer load balancer")
+                self.send_to_detokenizer.send_pyobj(data)
+            else:
+                # Direct detokenizer interface
+                logger.debug(f"🔌 Sending directly to detokenizer")
+                self.send_to_detokenizer.send_pyobj(data)
+
+            send_time = time.time() - send_start
+            total_time = time.time() - start_time
+
+            logger.info(
+                f"✅ Response processing completed in {total_time:.4f}s:\n"
+                f"   - Detokenizer check: {detokenizer_check_time:.4f}s\n"
+                f"   - Data preparation: {prep_time:.4f}s\n"
+                f"   - Send operation: {send_time:.4f}s\n"
+                f"   - Requests: {len(reqs)}, RIDs: {rids[:3]}{'...' if len(rids) > 3 else ''}"
+            )
+
+        except Exception as e:
+            send_time = time.time() - send_start
+            total_time = time.time() - start_time
+
+            logger.error(
+                f"❌ Failed to send requests {rids} to detokenizer: {e}\n"
+                f"   - Total time: {total_time:.4f}s\n"
+                f"   - Detokenizer check: {detokenizer_check_time:.4f}s\n"
+                f"   - Data preparation: {prep_time:.4f}s\n"
+                f"   - Send operation: {send_time:.4f}s\n"
+                f"   - Detokenizer type: {detokenizer_type}\n"
+                f"   - Exception type: {type(e).__name__}"
+            )
+            raise
+
+    def stream_output_embedding(
+        self,
+        reqs: List["Req"],
+        rids: List[str],
+        embeddings: List[List[float]],
+    ) -> None:
+        """Stream output embedding results."""
+        start_time = time.time()
+        logger.info(
+            f"🚀 GPU embedding completed, starting response processing for {len(reqs)} requests"
+        )
+
+        # Time the detokenizer interface check
+        detokenizer_check_start = time.time()
+        detokenizer_type = type(self.send_to_detokenizer).__name__
+        logger.info(f"🔍 Detokenizer interface type: {detokenizer_type}")
+        detokenizer_check_time = time.time() - detokenizer_check_start
+
+        # Time the data preparation
+        prep_start = time.time()
+        data = SrtPyObject(
+            rids=rids,
+            embeddings=embeddings,
+        )
+        prep_time = time.time() - prep_start
+
+        # Time the actual send operation
+        send_start = time.time()
+        try:
+            if hasattr(self.send_to_detokenizer, "send_pyobj"):
+                # Load balancer interface
+                logger.debug(f"🔀 Sending embeddings to detokenizer load balancer")
+                self.send_to_detokenizer.send_pyobj(data)
+            else:
+                # Direct detokenizer interface
+                logger.debug(f"🔌 Sending embeddings directly to detokenizer")
+                self.send_to_detokenizer.send_pyobj(data)
+
+            send_time = time.time() - send_start
+            total_time = time.time() - start_time
+
+            logger.info(
+                f"✅ Embedding response processing completed in {total_time:.4f}s:\n"
+                f"   - Detokenizer check: {detokenizer_check_time:.4f}s\n"
+                f"   - Data preparation: {prep_time:.4f}s\n"
+                f"   - Send operation: {send_time:.4f}s\n"
+                f"   - Requests: {len(reqs)}, RIDs: {rids[:3]}{'...' if len(rids) > 3 else ''}"
+            )
+
+        except Exception as e:
+            send_time = time.time() - send_start
+            total_time = time.time() - start_time
+
+            logger.error(
+                f"❌ Failed to send embedding requests {rids} to detokenizer: {e}\n"
+                f"   - Total time: {total_time:.4f}s\n"
+                f"   - Detokenizer check: {detokenizer_check_time:.4f}s\n"
+                f"   - Data preparation: {prep_time:.4f}s\n"
+                f"   - Send operation: {send_time:.4f}s\n"
+                f"   - Detokenizer type: {detokenizer_type}\n"
+                f"   - Exception type: {type(e).__name__}"
+            )
+            raise

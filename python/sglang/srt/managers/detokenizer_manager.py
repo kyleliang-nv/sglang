@@ -19,13 +19,14 @@ import os
 import signal
 import time
 from collections import OrderedDict
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import psutil
 import setproctitle
 import zmq
 
 from sglang.srt.hf_transformers_utils import get_tokenizer
+from sglang.srt.managers.base_manager import BaseManager
 from sglang.srt.managers.io_struct import (
     BatchEmbeddingOut,
     BatchMultimodalDecodeReq,
@@ -34,8 +35,10 @@ from sglang.srt.managers.io_struct import (
     BatchTokenIDOut,
 )
 from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.srt_py_object import SrtPyObject
 from sglang.srt.utils import (
     configure_logger,
+    get_scheduler_manager,
     get_zmq_socket,
     kill_itself_when_parent_died,
 )
@@ -66,204 +69,138 @@ class DecodeStatus:
     sent_offset: int = 0
 
 
-class DetokenizerManager:
-    """DetokenizerManager is a process that detokenizes the token ids."""
+class DetokenizerManager(BaseManager):
+    """Manager for detokenization process."""
 
     def __init__(
         self,
-        server_args: ServerArgs,
-        port_args: PortArgs,
+        server_args,
+        port_args,
         worker_id: int = 0,
     ):
-        # Store worker ID for logging
+        super().__init__(server_args, port_args)
         self.worker_id = worker_id
+        self.scheduler_manager = None
+        logger.info(f"🔧 DetokenizerManager {worker_id} initialized")
 
-        # Init inter-process communication
-        context = zmq.Context(2)
-        self.recv_from_scheduler = get_zmq_socket(
-            context, zmq.PULL, port_args.detokenizer_ipc_name, True
-        )
-        self.send_to_tokenizer = get_zmq_socket(
-            context, zmq.PUSH, port_args.tokenizer_ipc_name, False
-        )
+    def run(self):
+        """Run the detokenizer manager."""
+        start_time = time.time()
+        logger.info(f"🚀 DetokenizerManager {self.worker_id} starting...")
 
-        # For load balancer mode, responses need to go back to the scheduler
-        # We'll use the tokenizer socket for now, but the scheduler should handle routing
-        # The real fix is in the load balancer response handling
-
-        if server_args.skip_tokenizer_init:
-            self.tokenizer = None
-        else:
-            self.tokenizer = get_tokenizer(
-                server_args.tokenizer_path,
-                tokenizer_mode=server_args.tokenizer_mode,
-                trust_remote_code=server_args.trust_remote_code,
-                revision=server_args.revision,
-            )
-
-        self.decode_status = LimitedCapacityDict(capacity=DETOKENIZER_MAX_STATES)
-        self.is_dummy = server_args.load_format == "dummy"
-
-        # Performance monitoring
-        self.server_args = server_args
-        self.performance_stats = {
-            "total_requests": 0,
-            "total_tokens_processed": 0,
-            "total_processing_time": 0.0,
-            "queue_size_history": [],
-            "processing_latency_history": [],
-            "last_log_time": 0.0,
-            "log_interval": getattr(
-                server_args, "detokenizer_log_interval", 100
-            ),  # Log every 100 requests
-            "enable_detokenizer_logging": getattr(
-                server_args, "enable_detokenizer_logging", False
-            ),
-        }
-
-        self._request_dispatcher = TypeBasedDispatcher(
-            [
-                (BatchEmbeddingOut, self.handle_batch_embedding_out),
-                (BatchTokenIDOut, self.handle_batch_token_id_out),
-                (BatchMultimodalDecodeReq, self.handle_multimodal_decode_req),
-            ]
-        )
-
-        # Initialize performance monitoring
-        if self.performance_stats["enable_detokenizer_logging"]:
-            logger.info(
-                f"🔌 Worker {self.worker_id} - 🔍 Detokenizer performance monitoring enabled"
-            )
-            logger.info(
-                f"🔌 Worker {self.worker_id} - 📊 Log interval: every {self.performance_stats['log_interval']} requests"
-            )
-
-        # Log worker startup
+        # Time the scheduler connection
+        scheduler_start = time.time()
+        self.scheduler_manager = get_scheduler_manager(self.port_args)
+        scheduler_time = time.time() - scheduler_start
         logger.info(
-            f"🔌 Worker {self.worker_id} - 🚀 Detokenizer worker started successfully"
-        )
-        logger.info(
-            f"🔌 Worker {self.worker_id} - 📍 IPC endpoint: {port_args.detokenizer_ipc_name}"
-        )
-        logger.info(
-            f"🔌 Worker {self.worker_id} - 💾 Max states capacity: {DETOKENIZER_MAX_STATES}"
+            f"🔌 DetokenizerManager {self.worker_id} connected to scheduler in {scheduler_time:.4f}s"
         )
 
-    def _update_performance_stats(
-        self, request_count: int, token_count: int, processing_time: float
-    ):
-        """Update performance statistics"""
-        if not self.performance_stats["enable_detokenizer_logging"]:
-            return
+        # Time the main processing loop
+        loop_start = time.time()
+        try:
+            while True:
+                loop_iteration_start = time.time()
 
-        self.performance_stats["total_requests"] += request_count
-        self.performance_stats["total_tokens_processed"] += token_count
-        self.performance_stats["total_processing_time"] += processing_time
+                # Time the receive operation
+                receive_start = time.time()
+                data = self.scheduler_manager.recv_pyobj()
+                receive_time = time.time() - receive_start
 
-        # Store recent history (keep last 100 entries)
-        if len(self.performance_stats["processing_latency_history"]) >= 100:
-            self.performance_stats["processing_latency_history"].pop(0)
-        self.performance_stats["processing_latency_history"].append(processing_time)
+                if data is None:
+                    logger.info(
+                        f"🔍 DetokenizerManager {self.worker_id} received None, continuing..."
+                    )
+                    continue
 
-        # Log performance stats periodically
-        if (
-            self.performance_stats["total_requests"]
-            % self.performance_stats["log_interval"]
-            == 0
-            and self.performance_stats["total_requests"] > 0
-        ):
-            self._log_performance_stats()
+                # Time the processing operation
+                process_start = time.time()
+                self._process_data(data)
+                process_time = time.time() - process_start
 
-    def _log_performance_stats(self):
-        """Log comprehensive performance statistics"""
-        if not self.performance_stats["enable_detokenizer_logging"]:
-            return
+                loop_iteration_time = time.time() - loop_iteration_start
 
-        total_reqs = self.performance_stats["total_requests"]
-        total_tokens = self.performance_stats["total_tokens_processed"]
-        total_time = self.performance_stats["total_processing_time"]
-
-        # Calculate metrics
-        avg_latency = total_time / total_reqs if total_reqs > 0 else 0
-        throughput = total_tokens / total_time if total_time > 0 else 0
-        queue_size = len(self.decode_status)
-
-        # Calculate recent latency statistics
-        recent_latencies = self.performance_stats["processing_latency_history"][
-            -10:
-        ]  # Last 10 requests
-        avg_recent_latency = (
-            sum(recent_latencies) / len(recent_latencies) if recent_latencies else 0
-        )
-        max_recent_latency = max(recent_latencies) if recent_latencies else 0
-
-        # Determine bottleneck status
-        bottleneck_status = "🟢 Healthy"
-        if avg_recent_latency > 0.1:  # > 100ms
-            bottleneck_status = "🔴 Bottleneck"
-        elif avg_recent_latency > 0.05:  # > 50ms
-            bottleneck_status = "🟡 Warning"
-
-        # Log comprehensive stats
-        logger.info(
-            f"🔌 Worker {self.worker_id} - 📊 Detokenizer Performance Stats (last {self.performance_stats['log_interval']} requests):"
-        )
-        logger.info(
-            f"   {bottleneck_status} - Avg Latency: {avg_recent_latency*1000:.1f}ms, Max: {max_recent_latency*1000:.1f}ms"
-        )
-        logger.info(
-            f"   📈 Throughput: {throughput:.1f} tokens/sec, Queue Size: {queue_size}"
-        )
-        logger.info(
-            f"   📊 Total: {total_reqs} requests, {total_tokens} tokens, {total_time:.2f}s"
-        )
-
-        # Add worker summary for better visibility
-        logger.info(
-            f"🔌 Worker {self.worker_id} - 📋 Summary: Queue={queue_size}, "
-            f"Throughput={throughput:.0f} tokens/sec, "
-            f"Latency={avg_recent_latency*1000:.0f}ms"
-        )
-
-        # Log queue size warning if high
-        if queue_size > 1000:
-            logger.warning(
-                f"🔌 Worker {self.worker_id} - ⚠️  High detokenizer queue size: {queue_size} requests - potential bottleneck!"
-            )
-        elif queue_size > 500:
-            logger.info(
-                f"🔌 Worker {self.worker_id} - 📋 Moderate detokenizer queue size: {queue_size} requests"
-            )
-
-        # Store queue size history for trend analysis
-        if len(self.performance_stats["queue_size_history"]) >= 100:
-            self.performance_stats["queue_size_history"].pop(0)
-        self.performance_stats["queue_size_history"].append(queue_size)
-
-        # Log queue size trends
-        if len(self.performance_stats["queue_size_history"]) >= 10:
-            recent_queue_sizes = self.performance_stats["queue_size_history"][-10:]
-            avg_queue_size = sum(recent_queue_sizes) / len(recent_queue_sizes)
-            if queue_size > avg_queue_size * 1.5:  # 50% increase
-                logger.warning(
-                    f"🔌 Worker {self.worker_id} - 📈 Queue size increasing: {queue_size} (avg: {avg_queue_size:.1f}) - monitor for bottlenecks"
+                logger.debug(
+                    f"🔄 DetokenizerManager {self.worker_id} iteration completed in {loop_iteration_time:.4f}s:\n"
+                    f"   - Receive: {receive_time:.4f}s\n"
+                    f"   - Process: {process_time:.4f}s\n"
+                    f"   - Data type: {type(data).__name__}"
                 )
 
-    def event_loop(self):
-        """The event loop that handles requests"""
-        while True:
-            start_time = time.time()
-            recv_obj = self.recv_from_scheduler.recv_pyobj()
+        except Exception as e:
+            total_time = time.time() - start_time
+            logger.error(
+                f"❌ DetokenizerManager {self.worker_id} failed after {total_time:.2f}s: {e}\n"
+                f"   - Exception type: {type(e).__name__}"
+            )
+            raise
+        finally:
+            total_time = time.time() - start_time
+            logger.info(
+                f"🛑 DetokenizerManager {self.worker_id} stopped after {total_time:.2f}s"
+            )
 
-            # Process the request
-            output = self._request_dispatcher(recv_obj)
-            self.send_to_tokenizer.send_pyobj(output)
+    def _process_data(self, data: SrtPyObject):
+        """Process received data."""
+        start_time = time.time()
+        logger.info(
+            f"🔍 DetokenizerManager {self.worker_id} processing data: {type(data).__name__}"
+        )
 
-            # Update performance stats
-            processing_time = time.time() - start_time
-            request_count = 1
-            token_count = self._count_tokens_in_request(recv_obj)
-            self._update_performance_stats(request_count, token_count, processing_time)
+        # Time the data type check
+        type_check_start = time.time()
+        if hasattr(data, "output_ids"):
+            # Token generation output
+            logger.debug(
+                f"🔤 Processing token generation output for {len(data.rids)} requests"
+            )
+            output = BatchTokenIDOut(
+                rids=data.rids,
+                output_ids=data.output_ids,
+                logprobs=data.logprobs,
+                finish_reasons=data.finish_reasons,
+            )
+        elif hasattr(data, "embeddings"):
+            # Embedding output
+            logger.debug(
+                f"📊 Processing embedding output for {len(data.rids)} requests"
+            )
+            output = BatchEmbeddingOut(
+                rids=data.rids,
+                embeddings=data.embeddings,
+            )
+        else:
+            logger.warning(f"⚠️ Unknown data type: {type(data)}")
+            return
+
+        type_check_time = time.time() - type_check_start
+
+        # Time the response sending
+        send_start = time.time()
+        try:
+            self.scheduler_manager.send_pyobj(output)
+            send_time = time.time() - send_start
+            total_time = time.time() - start_time
+
+            logger.info(
+                f"✅ DetokenizerManager {self.worker_id} completed processing in {total_time:.4f}s:\n"
+                f"   - Type check: {type_check_time:.4f}s\n"
+                f"   - Send response: {send_time:.4f}s\n"
+                f"   - Requests: {len(data.rids)}, RIDs: {data.rids[:3]}{'...' if len(data.rids) > 3 else ''}"
+            )
+
+        except Exception as e:
+            send_time = time.time() - send_start
+            total_time = time.time() - start_time
+
+            logger.error(
+                f"❌ DetokenizerManager {self.worker_id} failed to send response: {e}\n"
+                f"   - Total time: {total_time:.4f}s\n"
+                f"   - Type check: {type_check_time:.4f}s\n"
+                f"   - Send attempt: {send_time:.4f}s\n"
+                f"   - Exception type: {type(e).__name__}"
+            )
+            raise
 
     def _count_tokens_in_request(self, recv_obj) -> int:
         """Count the number of tokens in a request for performance monitoring"""
@@ -445,7 +382,7 @@ def run_detokenizer_process(
 
     try:
         manager = DetokenizerManager(server_args, port_args, worker_id)
-        manager.event_loop()
+        manager.run()
     except Exception:
         traceback = get_exception_traceback()
         logger.error(

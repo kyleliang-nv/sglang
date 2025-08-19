@@ -835,19 +835,72 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
-        while True:
-            recv_reqs = self.recv_requests()
-            self.process_input_requests(recv_reqs)
+        loop_count = 0
+        last_log_time = time.time()
 
+        while True:
+            loop_start = time.time()
+            loop_count += 1
+
+            # Time the request reception
+            recv_start = time.time()
+            recv_reqs = self.recv_requests()
+            recv_time = time.time() - recv_start
+
+            # Time the input processing
+            input_start = time.time()
+            self.process_input_requests(recv_reqs)
+            input_time = time.time() - input_start
+
+            # Time the batch preparation
+            batch_start = time.time()
             batch = self.get_next_batch_to_run()
+            batch_time = time.time() - batch_start
+
             self.cur_batch = batch
 
             if batch:
+                # Time the batch execution
+                run_start = time.time()
                 result = self.run_batch(batch)
+                run_time = time.time() - run_start
+
+                # Time the result processing
+                result_start = time.time()
                 self.process_batch_result(batch, result)
+                result_time = time.time() - result_start
+
+                # Log timing every 100 loops or every 10 seconds
+                current_time = time.time()
+                if loop_count % 100 == 0 or (current_time - last_log_time) > 10:
+                    total_loop_time = time.time() - loop_start
+                    last_log_time = current_time
+
+                    logger.info(
+                        f"🔄 Scheduler loop {loop_count} completed in {total_loop_time:.4f}s:\n"
+                        f"   - Request reception: {recv_time:.4f}s\n"
+                        f"   - Input processing: {input_time:.4f}s\n"
+                        f"   - Batch preparation: {batch_time:.4f}s\n"
+                        f"   - Batch execution: {run_time:.4f}s\n"
+                        f"   - Result processing: {result_time:.4f}s\n"
+                        f"   - Batch size: {len(batch.reqs) if batch and batch.reqs else 0}"
+                    )
             else:
                 # When the server is idle, do self-check and re-init some states
+                idle_start = time.time()
                 self.self_check_during_idle()
+                idle_time = time.time() - idle_start
+
+                # Log idle timing every 100 loops
+                if loop_count % 100 == 0:
+                    total_loop_time = time.time() - loop_start
+                    logger.info(
+                        f"😴 Scheduler idle loop {loop_count} completed in {total_loop_time:.4f}s:\n"
+                        f"   - Request reception: {recv_time:.4f}s\n"
+                        f"   - Input processing: {input_time:.4f}s\n"
+                        f"   - Batch preparation: {batch_time:.4f}s\n"
+                        f"   - Idle processing: {idle_time:.4f}s"
+                    )
 
             self.last_batch = batch
 
@@ -855,17 +908,38 @@ class Scheduler(
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
+        loop_count = 0
+        last_log_time = time.time()
 
         while True:
-            recv_reqs = self.recv_requests()
-            self.process_input_requests(recv_reqs)
+            loop_start = time.time()
+            loop_count += 1
 
+            # Time the request reception
+            recv_start = time.time()
+            recv_reqs = self.recv_requests()
+            recv_time = time.time() - recv_start
+
+            # Time the input processing
+            input_start = time.time()
+            self.process_input_requests(recv_reqs)
+            input_time = time.time() - input_start
+
+            # Time the batch preparation
+            batch_start = time.time()
             batch = self.get_next_batch_to_run()
+            batch_time = time.time() - batch_start
+
             self.cur_batch = batch
 
             if batch:
                 batch.launch_done = threading.Event()
+
+                # Time the batch execution
+                run_start = time.time()
                 result = self.run_batch(batch)
+                run_time = time.time() - run_start
+
                 self.result_queue.append((batch.copy(), result))
 
                 if self.last_batch is None:
@@ -876,10 +950,15 @@ class Scheduler(
                         forward_mode=ForwardMode.DUMMY_FIRST,
                         next_batch_sampling_info=self.tp_worker.cur_sampling_info,
                     )
+
+                    # Time the dummy batch processing
+                    dummy_start = time.time()
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
+                    dummy_time = time.time() - dummy_start
 
             if self.last_batch:
                 # Process the results of the last batch
+                result_start = time.time()
                 tmp_batch, tmp_result = self.result_queue.popleft()
                 tmp_batch.next_batch_sampling_info = (
                     self.tp_worker.cur_sampling_info if batch else None
@@ -888,9 +967,41 @@ class Scheduler(
                 self.process_batch_result(
                     tmp_batch, tmp_result, batch.launch_done if batch else None
                 )
+                result_time = time.time() - result_start
+
+                # Log timing every 100 loops or every 10 seconds
+                current_time = time.time()
+                if loop_count % 100 == 0 or (current_time - last_log_time) > 10:
+                    total_loop_time = time.time() - loop_start
+                    last_log_time = current_time
+
+                    logger.info(
+                        f"🔄 Scheduler overlap loop {loop_count} completed in {total_loop_time:.4f}s:\n"
+                        f"   - Request reception: {recv_time:.4f}s\n"
+                        f"   - Input processing: {input_time:.4f}s\n"
+                        f"   - Batch preparation: {batch_time:.4f}s\n"
+                        f"   - Batch execution: {run_time:.4f}s\n"
+                        f"   - Dummy batch processing: {dummy_time:.4f}s\n"
+                        f"   - Result processing: {result_time:.4f}s\n"
+                        f"   - Batch size: {len(batch.reqs) if batch and batch.reqs else 0}\n"
+                        f"   - Result queue size: {len(self.result_queue)}"
+                    )
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
+                idle_start = time.time()
                 self.self_check_during_idle()
+                idle_time = time.time() - idle_start
+
+                # Log idle timing every 100 loops
+                if loop_count % 100 == 0:
+                    total_loop_time = time.time() - loop_start
+                    logger.info(
+                        f"😴 Scheduler overlap idle loop {loop_count} completed in {total_loop_time:.4f}s:\n"
+                        f"   - Request reception: {recv_time:.4f}s\n"
+                        f"   - Input processing: {input_time:.4f}s\n"
+                        f"   - Batch preparation: {batch_time:.4f}s\n"
+                        f"   - Idle processing: {idle_time:.4f}s"
+                    )
 
             self.last_batch = batch
 
@@ -1898,18 +2009,50 @@ class Scheduler(
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
         launch_done: Optional[threading.Event] = None,
     ):
+        start_time = time.time()
+        logger.debug(f"🔍 Processing batch result: {batch.forward_mode}")
+
         if batch.forward_mode.is_decode():
+            # Time decode processing
+            decode_start = time.time()
             self.process_batch_result_decode(batch, result, launch_done)
+            decode_time = time.time() - decode_start
+            logger.debug(f"🔤 Decode processing completed in {decode_time:.4f}s")
+
         elif batch.forward_mode.is_extend():
+            # Time prefill processing
+            prefill_start = time.time()
             self.process_batch_result_prefill(batch, result, launch_done)
+            prefill_time = time.time() - prefill_start
+            logger.debug(f"📝 Prefill processing completed in {prefill_time:.4f}s")
+
         elif batch.forward_mode.is_idle():
             if self.enable_overlap:
+                # Time overlap processing
+                overlap_start = time.time()
                 self.tp_worker.resolve_last_batch_result(launch_done)
                 self.set_next_batch_sampling_info_done(batch)
-        elif batch.forward_mode.is_dummy_first():
-            self.set_next_batch_sampling_info_done(batch)
+                overlap_time = time.time() - overlap_start
+                logger.debug(f"🔄 Overlap processing completed in {overlap_time:.4f}s")
 
+        elif batch.forward_mode.is_dummy_first():
+            # Time dummy processing
+            dummy_start = time.time()
+            self.set_next_batch_sampling_info_done(batch)
+            dummy_time = time.time() - dummy_start
+            logger.debug(f"🎭 Dummy processing completed in {dummy_time:.4f}s")
+
+        # Time health check
+        health_start = time.time()
         self.maybe_send_health_check_signal()
+        health_time = time.time() - health_start
+
+        total_time = time.time() - start_time
+        logger.debug(
+            f"✅ Batch result processing completed in {total_time:.4f}s:\n"
+            f"   - Mode: {batch.forward_mode}\n"
+            f"   - Health check: {health_time:.4f}s"
+        )
 
     def maybe_send_health_check_signal(self):
         if self.return_health_check_ct:
