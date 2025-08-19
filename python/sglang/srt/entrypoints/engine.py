@@ -744,6 +744,14 @@ def _launch_subprocesses(
         )
 
     scheduler_procs = []
+    logger.info(f"🔍 DEBUG: server_args.dp_size = {server_args.dp_size}")
+    logger.info(
+        f"🔍 DEBUG: server_args.enable_dp_attention = {getattr(server_args, 'enable_dp_attention', 'NOT_SET')}"
+    )
+    logger.info(
+        f"🔍 DEBUG: Condition check: server_args.dp_size == 1 = {server_args.dp_size} == 1 = {server_args.dp_size == 1}"
+    )
+
     if server_args.dp_size == 1:
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=server_args.enable_memory_saver
