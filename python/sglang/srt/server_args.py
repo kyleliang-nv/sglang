@@ -119,6 +119,8 @@ class ServerArgs:
     enable_detokenizer_logging: bool = False
     detokenizer_log_interval: int = 100
     enable_detokenizer_worker_logging: bool = False
+    enable_tokenizer_manager_queue_logging: bool = False
+    tokenizer_manager_queue_log_interval: int = 100
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
@@ -1139,6 +1141,18 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.enable_detokenizer_worker_logging,
             help="Enable verbose logging for detokenizer worker processes. Shows detailed request processing, timing, and state updates. Disabled by default to reduce log verbosity.",
+        )
+        parser.add_argument(
+            "--enable-tokenizer-manager-queue-logging",
+            action="store_true",
+            default=ServerArgs.enable_tokenizer_manager_queue_logging,
+            help="Enable periodic queue size logging for tokenizer manager. Shows how many requests are waiting to be processed. Useful for monitoring bottlenecks.",
+        )
+        parser.add_argument(
+            "--tokenizer-manager-queue-log-interval",
+            type=int,
+            default=ServerArgs.tokenizer_manager_queue_log_interval,
+            help="Log tokenizer manager queue status every N requests (default: 100).",
         )
         parser.add_argument(
             "--crash-dump-folder",

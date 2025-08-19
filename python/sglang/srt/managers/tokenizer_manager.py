@@ -1520,10 +1520,14 @@ class TokenizerManager:
         batch_size = len(recv_obj.rids)
         request_type = type(recv_obj).__name__
 
+        # Get current queue size (requests waiting to be processed)
+        current_queue_size = len(self.rid_to_state)
+
         logger.info(
             f"🔄 TokenizerManager: Starting batch output processing - "
             f"Type: {request_type}, Requests: {batch_size}, "
-            f"RIDs: {recv_obj.rids[:3]}{'...' if batch_size > 3 else ''}"
+            f"RIDs: {recv_obj.rids[:3]}{'...' if batch_size > 3 else ''}, "
+            f"Queue size: {current_queue_size} requests"
         )
 
         processed_count = 0
@@ -1688,15 +1692,68 @@ class TokenizerManager:
                 )
                 self.record_request_for_crash_dump(state, out_dict)
 
+            # Periodic queue status logging
+            if (
+                getattr(
+                    self.server_args, "enable_tokenizer_manager_queue_logging", False
+                )
+                and processed_count
+                % getattr(self.server_args, "tokenizer_manager_queue_log_interval", 100)
+                == 0
+            ):
+                self.log_queue_status(
+                    f"Every {getattr(self.server_args, 'tokenizer_manager_queue_log_interval', 100)} requests"
+                )
+
         total_time = time.time() - start_time
+
+        # Get updated queue size after processing
+        updated_queue_size = len(self.rid_to_state)
+
         logger.info(
             f"✅ TokenizerManager: Batch output processing completed in {total_time:.4f}s:\n"
             f"   - Request type: {request_type}\n"
             f"   - Total requests: {batch_size}\n"
             f"   - Successfully processed: {processed_count}\n"
             f"   - Errors: {error_count}\n"
-            f"   - Average time per request: {total_time/batch_size:.4f}s"
+            f"   - Average time per request: {total_time/batch_size:.4f}s\n"
+            f"   - Queue size: {updated_queue_size} requests (was {current_queue_size})"
         )
+
+    def log_queue_status(self, context: str = "Periodic check"):
+        """Log current queue status for monitoring"""
+        current_queue_size = len(self.rid_to_state)
+
+        # Determine queue health status
+        if current_queue_size == 0:
+            status = "🟢 Empty"
+        elif current_queue_size < 10:
+            status = "🟢 Healthy"
+        elif current_queue_size < 50:
+            status = "🟡 Moderate"
+        elif current_queue_size < 100:
+            status = "🟠 High"
+        else:
+            status = "🔴 Critical"
+
+        logger.info(
+            f"📊 TokenizerManager: Queue Status ({context}) - "
+            f"{status} - {current_queue_size} requests in queue"
+        )
+
+        # Log warning for high queue sizes
+        if current_queue_size >= 100:
+            logger.warning(
+                f"⚠️ TokenizerManager: High queue size detected! "
+                f"Current: {current_queue_size} requests - "
+                f"Consider scaling up or investigating bottlenecks"
+            )
+        elif current_queue_size >= 50:
+            logger.warning(
+                f"⚠️ TokenizerManager: Moderate queue size - "
+                f"Current: {current_queue_size} requests - "
+                f"Monitor for potential bottlenecks"
+            )
 
     def convert_logprob_style(
         self,
