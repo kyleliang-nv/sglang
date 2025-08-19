@@ -1710,15 +1710,24 @@ class TokenizerManager:
         # Get updated queue size after processing
         updated_queue_size = len(self.rid_to_state)
 
-        logger.info(
-            f"✅ TokenizerManager: Batch output processing completed in {total_time:.4f}s:\n"
-            f"   - Request type: {request_type}\n"
-            f"   - Total requests: {batch_size}\n"
-            f"   - Successfully processed: {processed_count}\n"
-            f"   - Errors: {error_count}\n"
-            f"   - Average time per request: {total_time/batch_size:.4f}s\n"
-            f"   - Queue size: {updated_queue_size} requests (was {current_queue_size})"
-        )
+        # Only log batch completion if enabled
+        if getattr(self.server_args, "enable_tokenizer_manager_batch_logging", False):
+            logger.info(
+                f"✅ TokenizerManager: Batch output processing completed in {total_time:.4f}s:\n"
+                f"   - Request type: {request_type}\n"
+                f"   - Total requests: {batch_size}\n"
+                f"   - Successfully processed: {processed_count}\n"
+                f"   - Errors: {error_count}\n"
+                f"   - Average time per request: {total_time/batch_size:.4f}s\n"
+                f"   - Queue size: {updated_queue_size} requests (was {current_queue_size})"
+            )
+        else:
+            # Log minimal info when batch logging is disabled
+            logger.debug(
+                f"✅ TokenizerManager: Batch {request_type} completed - "
+                f"{processed_count}/{batch_size} requests, "
+                f"Queue: {updated_queue_size} requests"
+            )
 
     def log_queue_status(self, context: str = "Periodic check"):
         """Log current queue status for monitoring"""

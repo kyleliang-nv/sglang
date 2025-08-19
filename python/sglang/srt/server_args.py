@@ -121,6 +121,8 @@ class ServerArgs:
     enable_detokenizer_worker_logging: bool = False
     enable_tokenizer_manager_queue_logging: bool = False
     tokenizer_manager_queue_log_interval: int = 100
+    enable_tokenizer_manager_batch_logging: bool = False
+    enable_scheduler_decode_logging: bool = False
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
@@ -1153,6 +1155,18 @@ class ServerArgs:
             type=int,
             default=ServerArgs.tokenizer_manager_queue_log_interval,
             help="Log tokenizer manager queue status every N requests (default: 100).",
+        )
+        parser.add_argument(
+            "--enable-tokenizer-manager-batch-logging",
+            action="store_true",
+            default=ServerArgs.enable_tokenizer_manager_batch_logging,
+            help="Enable verbose batch completion logging for tokenizer manager. Shows detailed timing breakdown for each batch. Disabled by default to reduce log verbosity.",
+        )
+        parser.add_argument(
+            "--enable-scheduler-decode-logging",
+            action="store_true",
+            default=ServerArgs.enable_scheduler_decode_logging,
+            help="Enable verbose decode completion logging for scheduler. Shows detailed timing breakdown for decode operations. Disabled by default to reduce log verbosity.",
         )
         parser.add_argument(
             "--crash-dump-folder",

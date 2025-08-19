@@ -312,15 +312,24 @@ class SchedulerOutputProcessorMixin:
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
 
         total_time = time.time() - start_time
-        logger.info(
-            f"✅ Decode batch result processing completed in {total_time:.4f}s:\n"
-            f"   - Result extraction: {extract_time:.4f}s\n"
-            f"   - Memory pool operations: {pool_time:.4f}s\n"
-            f"   - Request processing loop: {loop_time:.4f}s\n"
-            f"   - Output streaming: {stream_time:.4f}s\n"
-            f"   - Final cleanup: {cleanup_time:.4f}s\n"
-            f"   - Requests: {len(batch.reqs)}, Return logprob: {batch.return_logprob}"
-        )
+
+        # Only log decode completion if enabled
+        if getattr(self.server_args, "enable_scheduler_decode_logging", False):
+            logger.info(
+                f"✅ Decode batch result processing completed in {total_time:.4f}s:\n"
+                f"   - Result extraction: {extract_time:.4f}s\n"
+                f"   - Memory pool operations: {pool_time:.4f}s\n"
+                f"   - Request processing loop: {loop_time:.4f}s\n"
+                f"   - Output streaming: {stream_time:.4f}s\n"
+                f"   - Final cleanup: {cleanup_time:.4f}s\n"
+                f"   - Requests: {len(batch.reqs)}, Return logprob: {batch.return_logprob}"
+            )
+        else:
+            # Log minimal info when decode logging is disabled
+            logger.debug(
+                f"✅ Decode batch completed in {total_time:.4f}s - "
+                f"{len(batch.reqs)} requests"
+            )
 
         # Log decode stats for monitoring decode batch performance
         if hasattr(self, "log_decode_stats"):
