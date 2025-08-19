@@ -43,17 +43,6 @@ class DetokenizerLoadBalancer:
         self.worker_sockets: List[zmq.Socket] = []
         self.worker_stats: List[Dict] = []
 
-        # Add response socket to receive responses from detokenizer workers
-        self.response_socket = self.context.socket(zmq.PULL)
-        # Bind to a temporary port for receiving responses
-        self.response_port = self.response_socket.bind_to_random_port("tcp://*")
-        logger.info(f"🔌 Response socket bound to port {self.response_port}")
-
-        # Add response notification mechanism
-        self.response_callbacks = {}  # Map request ID to callback function
-        self.response_thread = None
-        self.start_response_thread()
-
         # Thread safety
         self.lock = threading.Lock()
         self.round_robin_counter = 0
