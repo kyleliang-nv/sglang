@@ -708,7 +708,15 @@ def _launch_subprocesses(
     detoken_port_args_list = [port_args]  # Default to single worker
 
     # Create additional port args for multiple workers BEFORE launching schedulers
-    if server_args.num_detokenizer_workers > 1:
+    # Skip for prefill servers in PD-disagg mode (not needed)
+    if (
+        hasattr(server_args, "disaggregation_mode")
+        and server_args.disaggregation_mode == "prefill"
+    ):
+        logger.info(
+            "🚀 Prefill server detected - skipping detokenizer port configuration"
+        )
+    elif server_args.num_detokenizer_workers > 1:
         logger.info(
             f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
         )
@@ -757,7 +765,17 @@ def _launch_subprocesses(
         )
 
     scheduler_procs = []
-    if server_args.dp_size == 1:
+
+    # Skip scheduler creation for prefill servers in PD-disagg mode
+    if (
+        hasattr(server_args, "disaggregation_mode")
+        and server_args.disaggregation_mode == "prefill"
+    ):
+        logger.info(
+            "🚀 Prefill server detected - skipping scheduler creation (not needed)"
+        )
+        scheduler_pipe_readers = []
+    elif server_args.dp_size == 1:
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=server_args.enable_memory_saver
         )
@@ -857,12 +875,30 @@ def _launch_subprocesses(
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
         # so they can just wait here.
 
-        for reader in scheduler_pipe_readers:
-            data = reader.recv()
-            assert data["status"] == "ready"
+        # Handle prefill servers (no schedulers to wait for)
+        if (
+            hasattr(server_args, "disaggregation_mode")
+            and server_args.disaggregation_mode == "prefill"
+        ):
+            logger.info(
+                "🚀 Prefill server on non-zero rank - no schedulers to wait for"
+            )
+        else:
+            # Normal mode - wait for schedulers
+            for reader in scheduler_pipe_readers:
+                data = reader.recv()
+                assert data["status"] == "ready"
 
         if os.getenv("SGLANG_BLOCK_NONZERO_RANK_CHILDREN") == "0":
             # When using `Engine` as a Python API, we don't want to block here.
+            return None, None, None
+
+        # For prefill servers, no need to wait for schedulers or launch health check
+        if (
+            hasattr(server_args, "disaggregation_mode")
+            and server_args.disaggregation_mode == "prefill"
+        ):
+            logger.info("🚀 Prefill server on non-zero rank - returning early")
             return None, None, None
 
         launch_dummy_health_check_server(
@@ -877,7 +913,16 @@ def _launch_subprocesses(
         return None, None, None
 
     # Launch detokenizer process based on configuration
-    if getattr(server_args, "use_combined_workers", True):
+    # Skip detokenizer workers for prefill servers in PD-disagg mode
+    if (
+        hasattr(server_args, "disaggregation_mode")
+        and server_args.disaggregation_mode == "prefill"
+    ):
+        logger.info(
+            "🚀 Prefill server detected - skipping detokenizer workers (not needed)"
+        )
+        detoken_procs = []
+    elif getattr(server_args, "use_combined_workers", True):
         logger.info(
             "🚀 Using combined workers (detokenizer + tokenizer manager in single process)"
         )
@@ -977,22 +1022,36 @@ def _launch_subprocesses(
 
     # Wait for the model to finish loading
     scheduler_infos = []
-    for i in range(len(scheduler_pipe_readers)):
-        try:
-            data = scheduler_pipe_readers[i].recv()
-        except EOFError:
-            logger.error(
-                f"Rank {i} scheduler is dead. Please check if there are relevant logs."
-            )
-            scheduler_procs[i].join()
-            logger.error(f"Exit code: {scheduler_procs[i].exitcode}")
-            raise
 
-        if data["status"] != "ready":
-            raise RuntimeError(
-                "Initialization failed. Please see the error messages above."
-            )
-        scheduler_infos.append(data)
+    # Handle prefill servers in PD-disagg mode (no schedulers to wait for)
+    if (
+        hasattr(server_args, "disaggregation_mode")
+        and server_args.disaggregation_mode == "prefill"
+    ):
+        logger.info(
+            "🚀 Prefill server - no schedulers to wait for, creating dummy scheduler info"
+        )
+        scheduler_infos = [
+            {"status": "ready", "max_req_input_len": 8192}
+        ]  # Default values
+    else:
+        # Normal mode - wait for schedulers
+        for i in range(len(scheduler_pipe_readers)):
+            try:
+                data = scheduler_pipe_readers[i].recv()
+            except EOFError:
+                logger.error(
+                    f"Rank {i} scheduler is dead. Please check if there are relevant logs."
+                )
+                scheduler_procs[i].join()
+                logger.error(f"Exit code: {scheduler_procs[i].exitcode}")
+                raise
+
+            if data["status"] != "ready":
+                raise RuntimeError(
+                    "Initialization failed. Please see the error messages above."
+                )
+            scheduler_infos.append(data)
 
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
