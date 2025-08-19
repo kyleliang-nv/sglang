@@ -223,6 +223,7 @@ class Scheduler(
     ):
         # Parse args
         self.server_args = server_args
+        self.port_args = port_args  # Store port_args for later use
         self.tp_rank = tp_rank
         self.moe_ep_rank = moe_ep_rank
         self.pp_rank = pp_rank

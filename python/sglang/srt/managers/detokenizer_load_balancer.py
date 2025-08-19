@@ -57,9 +57,6 @@ class DetokenizerLoadBalancer:
         self.last_cleanup_time = time.time()
         self.cleanup_interval = 300  # Clean up every 5 minutes
 
-        # Request affinity tracking
-        self.request_worker_map: Dict[str, int] = {}
-
         # Worker connections
         self.workers: List[Optional[object]] = [None] * self.num_workers
         self.worker_stats = {
@@ -78,7 +75,7 @@ class DetokenizerLoadBalancer:
         self.affinity_misses = 0
 
         logger.info(
-            f"🔀 DetokenizerLoadBalancer {worker_id} initializing with {self.num_workers} workers"
+            f"🔀 DetokenizerLoadBalancer initializing with {self.num_workers} workers"
         )
 
         # Initialize worker connections
@@ -88,14 +85,14 @@ class DetokenizerLoadBalancer:
         """Initialize connections to all detokenizer workers."""
         start_time = time.time()
         logger.info(
-            f"🔌 DetokenizerLoadBalancer {self.worker_id} connecting to {self.num_workers} workers..."
+            f"🔌 DetokenizerLoadBalancer connecting to {self.num_workers} workers..."
         )
 
         # Initialize ZMQ context
         context = zmq.Context()
 
         successful_connections = 0
-        for i, port_args in enumerate(self.detokenizer_port_args_list):
+        for i, port_args in enumerate(self.port_args_list):
             worker_start = time.time()
             try:
                 # Create PUSH socket to send work to this worker
@@ -125,7 +122,7 @@ class DetokenizerLoadBalancer:
 
         total_time = time.time() - start_time
         logger.info(
-            f"🔀 DetokenizerLoadBalancer {self.worker_id} initialized with {successful_connections}/{self.num_workers} workers "
+            f"🔀 DetokenizerLoadBalancer initialized with {successful_connections}/{self.num_workers} workers "
             f"in {total_time:.4f}s"
         )
 
@@ -136,7 +133,7 @@ class DetokenizerLoadBalancer:
         """Send data to the appropriate worker based on load balancing."""
         start_time = time.time()
         logger.info(
-            f"🔀 DetokenizerLoadBalancer {self.worker_id} processing request: {type(data).__name__}"
+            f"🔀 DetokenizerLoadBalancer processing request: {type(data).__name__}"
         )
 
         # Time the request ID extraction
@@ -162,7 +159,7 @@ class DetokenizerLoadBalancer:
             self.worker_stats["requests_assigned"][worker_id] += 1
 
             logger.info(
-                f"✅ DetokenizerLoadBalancer {self.worker_id} completed request in {total_time:.4f}s:\n"
+                f"✅ DetokenizerLoadBalancer completed request in {total_time:.4f}s:\n"
                 f"   - Request ID extraction: {rid_time:.4f}s\n"
                 f"   - Worker selection: {worker_time:.4f}s\n"
                 f"   - Send operation: {send_time:.4f}s\n"
@@ -175,7 +172,7 @@ class DetokenizerLoadBalancer:
             total_time = time.time() - start_time
 
             logger.error(
-                f"❌ DetokenizerLoadBalancer {self.worker_id} failed to send request: {e}\n"
+                f"❌ DetokenizerLoadBalancer failed to send request: {e}\n"
                 f"   - Total time: {total_time:.4f}s\n"
                 f"   - Request ID extraction: {rid_time:.4f}s\n"
                 f"   - Worker selection: {worker_time:.4f}s\n"
