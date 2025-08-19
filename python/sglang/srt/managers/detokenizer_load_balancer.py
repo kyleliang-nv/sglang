@@ -14,29 +14,48 @@
 """DetokenizerLoadBalancer distributes work among multiple detokenizer workers."""
 
 import logging
+import random
+import threading
 import time
-from typing import Dict, List, Optional, Set
+from collections import defaultdict
+from typing import Dict, List, Optional
 
 import zmq
+
+from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
 
 
 class DetokenizerLoadBalancer:
-    """Load balancer for distributing detokenization work across multiple workers."""
+    """Load balancer for multiple detokenizer workers."""
 
-    def __init__(
-        self,
-        server_args,
-        port_args,
-        detokenizer_port_args_list,
-        worker_id: int = 0,
-    ):
+    def __init__(self, server_args: ServerArgs, port_args_list: List):
         self.server_args = server_args
-        self.port_args = port_args
-        self.worker_id = worker_id
-        self.detokenizer_port_args_list = detokenizer_port_args_list
-        self.num_workers = len(detokenizer_port_args_list)
+        self.port_args_list = port_args_list
+        self.num_workers = server_args.num_detokenizer_workers
+        self.load_balance_method = getattr(
+            server_args, "detokenizer_load_balance_method", "round_robin"
+        )
+
+        # Initialize ZMQ sockets for each worker
+        self.context = zmq.Context()
+        self.worker_sockets: List[zmq.Socket] = []
+        self.worker_stats: List[Dict] = []
+
+        # Thread safety
+        self.lock = threading.Lock()
+        self.round_robin_counter = 0
+
+        # Initialize stats logging
+        self._last_stats_log = time.time()
+
+        # Request affinity: map request ID to assigned worker
+        self.request_worker_map: Dict[str, int] = {}
+
+        # Cleanup tracking
+        self.last_cleanup_time = time.time()
+        self.cleanup_interval = 300  # Clean up every 5 minutes
 
         # Request affinity tracking
         self.request_worker_map: Dict[str, int] = {}

@@ -34,7 +34,6 @@ from sglang.srt.managers.io_struct import (
     BatchTokenIDOut,
 )
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.srt_py_object import SrtPyObject
 from sglang.srt.utils import (
     configure_logger,
     get_zmq_socket,
@@ -68,147 +67,99 @@ class DecodeStatus:
 
 
 class DetokenizerManager:
-    """Manager for detokenization process."""
+    """DetokenizerManager is a process that detokenizes the token ids."""
 
     def __init__(
         self,
-        server_args,
-        port_args,
+        server_args: ServerArgs,
+        port_args: PortArgs,
         worker_id: int = 0,
     ):
-        self.server_args = server_args
-        self.port_args = port_args
+        # Store worker ID for logging
         self.worker_id = worker_id
-        self.scheduler_manager = None
-        logger.info(f"🔧 DetokenizerManager {worker_id} initialized")
 
-    def run(self):
-        """Run the detokenizer manager."""
-        start_time = time.time()
-        logger.info(f"🚀 DetokenizerManager {self.worker_id} starting...")
-
-        # Time the scheduler connection
-        scheduler_start = time.time()
-
-        # Initialize ZMQ context and sockets
+        # Init inter-process communication
         context = zmq.Context(2)
         self.recv_from_scheduler = get_zmq_socket(
-            context, zmq.PULL, self.port_args.detokenizer_ipc_name, True
+            context, zmq.PULL, port_args.detokenizer_ipc_name, True
         )
-        self.send_to_scheduler = get_zmq_socket(
-            context, zmq.PUSH, self.port_args.scheduler_input_ipc_name, False
-        )
-
-        scheduler_time = time.time() - scheduler_start
-        logger.info(
-            f"🔌 DetokenizerManager {self.worker_id} connected to scheduler in {scheduler_time:.4f}s"
+        self.send_to_tokenizer = get_zmq_socket(
+            context, zmq.PUSH, port_args.tokenizer_ipc_name, False
         )
 
-        # Time the main processing loop
-        loop_start = time.time()
-        try:
-            while True:
-                loop_iteration_start = time.time()
-
-                # Time the receive operation
-                receive_start = time.time()
-                data = self.recv_from_scheduler.recv_pyobj()
-                receive_time = time.time() - receive_start
-
-                if data is None:
-                    logger.info(
-                        f"🔍 DetokenizerManager {self.worker_id} received None, continuing..."
-                    )
-                    continue
-
-                # Time the processing operation
-                process_start = time.time()
-                self._process_data(data)
-                process_time = time.time() - process_start
-
-                loop_iteration_time = time.time() - loop_iteration_start
-
-                logger.debug(
-                    f"🔄 DetokenizerManager {self.worker_id} iteration completed in {loop_iteration_time:.4f}s:\n"
-                    f"   - Receive: {receive_time:.4f}s\n"
-                    f"   - Process: {process_time:.4f}s\n"
-                    f"   - Data type: {type(data).__name__}"
-                )
-
-        except Exception as e:
-            total_time = time.time() - start_time
-            logger.error(
-                f"❌ DetokenizerManager {self.worker_id} failed after {total_time:.2f}s: {e}\n"
-                f"   - Exception type: {type(e).__name__}"
-            )
-            raise
-        finally:
-            total_time = time.time() - start_time
-            logger.info(
-                f"🛑 DetokenizerManager {self.worker_id} stopped after {total_time:.2f}s"
-            )
-
-    def _process_data(self, data: SrtPyObject):
-        """Process received data."""
-        start_time = time.time()
-        logger.info(
-            f"🔍 DetokenizerManager {self.worker_id} processing data: {type(data).__name__}"
-        )
-
-        # Time the data type check
-        type_check_start = time.time()
-        if hasattr(data, "output_ids"):
-            # Token generation output
-            logger.debug(
-                f"🔤 Processing token generation output for {len(data.rids)} requests"
-            )
-            output = BatchTokenIDOut(
-                rids=data.rids,
-                output_ids=data.output_ids,
-                logprobs=data.logprobs,
-                finish_reasons=data.finish_reasons,
-            )
-        elif hasattr(data, "embeddings"):
-            # Embedding output
-            logger.debug(
-                f"📊 Processing embedding output for {len(data.rids)} requests"
-            )
-            output = BatchEmbeddingOut(
-                rids=data.rids,
-                embeddings=data.embeddings,
-            )
+        if server_args.skip_tokenizer_init:
+            self.tokenizer = None
         else:
-            logger.warning(f"⚠️ Unknown data type: {type(data)}")
-            return
+            self.tokenizer = get_tokenizer(
+                server_args.tokenizer_path,
+                tokenizer_mode=server_args.tokenizer_mode,
+                trust_remote_code=server_args.trust_remote_code,
+                revision=server_args.revision,
+            )
 
-        type_check_time = time.time() - type_check_start
+        self.decode_status = LimitedCapacityDict(capacity=DETOKENIZER_MAX_STATES)
+        self.is_dummy = server_args.load_format == "dummy"
 
-        # Time the response sending
-        send_start = time.time()
-        try:
-            self.send_to_scheduler.send_pyobj(output)
-            send_time = time.time() - send_start
-            total_time = time.time() - start_time
+        # Performance monitoring
+        self.server_args = server_args
+        self.performance_stats = {
+            "total_requests": 0,
+            "total_tokens_processed": 0,
+            "total_processing_time": 0.0,
+            "queue_size_history": [],
+            "processing_latency_history": [],
+            "last_log_time": 0.0,
+            "log_interval": getattr(
+                server_args, "detokenizer_log_interval", 100
+            ),  # Log every 100 requests
+            "enable_detokenizer_logging": getattr(
+                server_args, "enable_detokenizer_logging", False
+            ),
+        }
 
+        self._request_dispatcher = TypeBasedDispatcher(
+            [
+                (BatchEmbeddingOut, self.handle_batch_embedding_out),
+                (BatchTokenIDOut, self.handle_batch_token_id_out),
+                (BatchMultimodalDecodeReq, self.handle_multimodal_decode_req),
+            ]
+        )
+
+        # Initialize performance monitoring
+        if self.performance_stats["enable_detokenizer_logging"]:
             logger.info(
-                f"✅ DetokenizerManager {self.worker_id} completed processing in {total_time:.4f}s:\n"
-                f"   - Type check: {type_check_time:.4f}s\n"
-                f"   - Send response: {send_time:.4f}s\n"
-                f"   - Requests: {len(data.rids)}, RIDs: {data.rids[:3]}{'...' if len(data.rids) > 3 else ''}"
+                f"🔌 Worker {self.worker_id} - 🔍 Detokenizer performance monitoring enabled"
+            )
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 📊 Log interval: every {self.performance_stats['log_interval']} requests"
             )
 
-        except Exception as e:
-            send_time = time.time() - send_start
-            total_time = time.time() - start_time
+        # Log worker startup
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 🚀 Detokenizer worker started successfully"
+        )
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 📍 IPC endpoint: {port_args.detokenizer_ipc_name}"
+        )
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 💾 Max states capacity: {DETOKENIZER_MAX_STATES}"
+        )
 
-            logger.error(
-                f"❌ DetokenizerManager {self.worker_id} failed to send response: {e}\n"
-                f"   - Total time: {total_time:.4f}s\n"
-                f"   - Type check: {type_check_time:.4f}s\n"
-                f"   - Send attempt: {send_time:.4f}s\n"
-                f"   - Exception type: {type(e).__name__}"
-            )
-            raise
+    def event_loop(self):
+        """The event loop that handles requests"""
+        while True:
+            start_time = time.time()
+            recv_obj = self.recv_from_scheduler.recv_pyobj()
+
+            # Process the request
+            output = self._request_dispatcher(recv_obj)
+            self.send_to_tokenizer.send_pyobj(output)
+
+            # Update performance stats
+            processing_time = time.time() - start_time
+            request_count = 1
+            token_count = self._count_tokens_in_request(recv_obj)
+            self._update_performance_stats(request_count, token_count, processing_time)
 
     def _count_tokens_in_request(self, recv_obj) -> int:
         """Count the number of tokens in a request for performance monitoring"""
