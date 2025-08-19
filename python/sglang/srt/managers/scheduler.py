@@ -2689,6 +2689,16 @@ def run_scheduler_process(
             and len(detokenizer_port_args_list) > 1
         ):
             scheduler.init_detokenizer_load_balancer(detokenizer_port_args_list)
+        else:
+            # Ensure send_to_detokenizer is properly set for single worker mode
+            if scheduler.send_to_detokenizer is None:
+                logger.warning(
+                    "⚠️ send_to_detokenizer is None, creating fallback socket"
+                )
+                context = zmq.Context(2)
+                scheduler.send_to_detokenizer = get_zmq_socket(
+                    context, zmq.PUSH, port_args.detokenizer_ipc_name, False
+                )
 
         pipe_writer.send(
             {

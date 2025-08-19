@@ -670,36 +670,50 @@ class SchedulerOutputProcessorMixin:
             if self.model_config.is_multimodal_gen:
                 return
 
-            self.send_to_detokenizer.send_pyobj(
-                BatchTokenIDOut(
-                    rids,
-                    finished_reasons,
-                    decoded_texts,
-                    decode_ids_list,
-                    read_offsets,
-                    output_ids,
-                    skip_special_tokens,
-                    spaces_between_special_tokens,
-                    no_stop_trim,
-                    prompt_tokens,
-                    completion_tokens,
-                    cached_tokens,
-                    spec_verify_ct,
-                    input_token_logprobs_val,
-                    input_token_logprobs_idx,
-                    output_token_logprobs_val,
-                    output_token_logprobs_idx,
-                    input_top_logprobs_val,
-                    input_top_logprobs_idx,
-                    output_top_logprobs_val,
-                    output_top_logprobs_idx,
-                    input_token_ids_logprobs_val,
-                    input_token_ids_logprobs_idx,
-                    output_token_ids_logprobs_val,
-                    output_token_ids_logprobs_idx,
-                    output_hidden_states,
+            # Safety check: ensure send_to_detokenizer is properly initialized
+            if self.send_to_detokenizer is None:
+                logger.error(
+                    "❌ send_to_detokenizer is None! Cannot send output to detokenizer."
                 )
-            )
+                logger.error(
+                    f"Requests {rids} will be dropped. This indicates a configuration error."
+                )
+                return
+
+            try:
+                self.send_to_detokenizer.send_pyobj(
+                    BatchTokenIDOut(
+                        rids,
+                        finished_reasons,
+                        decoded_texts,
+                        decode_ids_list,
+                        read_offsets,
+                        output_ids,
+                        skip_special_tokens,
+                        spaces_between_special_tokens,
+                        no_stop_trim,
+                        prompt_tokens,
+                        completion_tokens,
+                        cached_tokens,
+                        spec_verify_ct,
+                        input_token_logprobs_val,
+                        input_token_logprobs_idx,
+                        output_token_logprobs_val,
+                        output_token_logprobs_idx,
+                        input_top_logprobs_val,
+                        input_top_logprobs_idx,
+                        output_top_logprobs_val,
+                        output_top_logprobs_idx,
+                        input_token_ids_logprobs_val,
+                        input_token_ids_logprobs_idx,
+                        output_token_ids_logprobs_val,
+                        output_token_ids_logprobs_idx,
+                        output_hidden_states,
+                    )
+                )
+            except Exception as e:
+                logger.error(f"❌ Failed to send requests {rids} to detokenizer: {e}")
+                # Continue processing instead of crashing
 
     def stream_output_embedding(self: Scheduler, reqs: List[Req]):
         rids = []
@@ -715,8 +729,24 @@ class SchedulerOutputProcessorMixin:
                 embeddings.append(req.embedding)
                 prompt_tokens.append(len(req.origin_input_ids))
                 cached_tokens.append(req.cached_tokens)
-        self.send_to_detokenizer.send_pyobj(
-            BatchEmbeddingOut(
-                rids, finished_reasons, embeddings, prompt_tokens, cached_tokens
+        # Safety check: ensure send_to_detokenizer is properly initialized
+        if self.send_to_detokenizer is None:
+            logger.error(
+                "❌ send_to_detokenizer is None! Cannot send embedding output to detokenizer."
             )
-        )
+            logger.error(
+                f"Requests {rids} will be dropped. This indicates a configuration error."
+            )
+            return
+
+        try:
+            self.send_to_detokenizer.send_pyobj(
+                BatchEmbeddingOut(
+                    rids, finished_reasons, embeddings, prompt_tokens, cached_tokens
+                )
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ Failed to send embedding requests {rids} to detokenizer: {e}"
+            )
+            # Continue processing instead of crashing

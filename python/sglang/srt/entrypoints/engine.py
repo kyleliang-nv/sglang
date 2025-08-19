@@ -706,6 +706,29 @@ def _launch_subprocesses(
     # Initialize detokenizer port args list for multiple workers
     detoken_port_args_list = [port_args]  # Default to single worker
 
+    # Create additional port args for multiple workers BEFORE launching schedulers
+    if server_args.num_detokenizer_workers > 1:
+        logger.info(
+            f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
+        )
+
+        # Create additional port args for extra workers
+        for i in range(1, server_args.num_detokenizer_workers):
+            # Create new port args with unique IPC names
+            worker_port_args = PortArgs(
+                tokenizer_ipc_name=port_args.tokenizer_ipc_name,  # Same tokenizer
+                scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,  # Same scheduler
+                detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                nccl_port=port_args.nccl_port,
+                rpc_ipc_name=port_args.rpc_ipc_name,
+                metrics_ipc_name=port_args.metrics_ipc_name,
+            )
+            detoken_port_args_list.append(worker_port_args)
+
+            logger.info(
+                f"🔌 Prepared detokenizer worker {i+1} IPC: {worker_port_args.detokenizer_ipc_name}"
+            )
+
     scheduler_procs = []
     if server_args.dp_size == 1:
         memory_saver_adapter = TorchMemorySaverAdapter.create(
@@ -814,39 +837,27 @@ def _launch_subprocesses(
 
     # Launch multiple detokenizer workers if configured
     detoken_procs = [detoken_proc]  # Keep the first one for backward compatibility
-    detoken_port_args_list = [port_args]  # List of port args for all workers
 
     if server_args.num_detokenizer_workers > 1:
         logger.info(
             f"🚀 Launching {server_args.num_detokenizer_workers} detokenizer workers..."
         )
 
-        # Create additional port args for extra workers
+        # Launch additional detokenizer workers using the pre-configured port args
         for i in range(1, server_args.num_detokenizer_workers):
-            # Create new port args with unique IPC names
-            worker_port_args = PortArgs(
-                tokenizer_ipc_name=port_args.tokenizer_ipc_name,  # Same tokenizer
-                scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,  # Same scheduler
-                detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
-                nccl_port=port_args.nccl_port,
-                rpc_ipc_name=port_args.rpc_ipc_name,
-                metrics_ipc_name=port_args.metrics_ipc_name,
-            )
-
             # Launch additional detokenizer worker
             worker_proc = mp.Process(
                 target=run_detokenizer_process,
                 args=(
                     server_args,
-                    worker_port_args,
+                    detoken_port_args_list[i],  # Use pre-configured port args
                 ),
             )
             worker_proc.start()
             detoken_procs.append(worker_proc)
-            detoken_port_args_list.append(worker_port_args)
 
             logger.info(
-                f"🔌 Launched detokenizer worker {i+1} with IPC: {worker_port_args.detokenizer_ipc_name}"
+                f"🔌 Launched detokenizer worker {i+1} with IPC: {detoken_port_args_list[i].detokenizer_ipc_name}"
             )
     else:
         logger.info("🔌 Using single detokenizer worker")
