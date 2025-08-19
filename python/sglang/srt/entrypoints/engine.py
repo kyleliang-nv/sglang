@@ -718,16 +718,9 @@ def _launch_subprocesses(
         # Create additional port args for extra workers
         for i in range(1, server_args.num_detokenizer_workers):
             # Create new port args with TCP sockets for bidirectional communication
-            # Use a different port for each worker to avoid conflicts
-            tcp_port = (
-                port_args.detokenizer_ipc_name.split(":")[-1]
-                if ":" in port_args.detokenizer_ipc_name
-                else "5759"
-            )
-            base_port = int(tcp_port) if tcp_port.isdigit() else 5759
-            worker_port = (
-                base_port + (i * 10) + 1
-            )  # Use larger increments (10, 20, 30...) to avoid conflicts
+            # Use a completely different port range to avoid conflicts with scheduler ports
+            # Start from port 6000 for detokenizer workers
+            worker_port = 6000 + i
 
             # Get the host from the main port args or use localhost
             host = (
