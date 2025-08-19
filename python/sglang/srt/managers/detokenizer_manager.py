@@ -168,17 +168,67 @@ class DetokenizerManager:
         """The event loop that handles requests"""
         while True:
             start_time = time.time()
-            recv_obj = self.recv_from_scheduler.recv_pyobj()
 
-            # Process the request
+            # Time the receive operation
+            recv_start = time.time()
+            recv_obj = self.recv_from_scheduler.recv_pyobj()
+            recv_time = time.time() - recv_start
+
+            # Log what we received
+            request_type = type(recv_obj).__name__
+            request_count = self._get_request_count(recv_obj)
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 📥 RECEIVED request: {request_type} "
+                f"with {request_count} requests in {recv_time:.4f}s"
+            )
+
+            # Time the processing operation
+            process_start = time.time()
             output = self._request_dispatcher(recv_obj)
+            process_time = time.time() - process_start
+
+            # Log what we're sending back
+            output_type = type(output).__name__
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 🔄 PROCESSED request: {request_type} → {output_type} "
+                f"in {process_time:.4f}s"
+            )
+
+            # Time the send operation
+            send_start = time.time()
             self.send_to_tokenizer.send_pyobj(output)
+            send_time = time.time() - send_start
+
+            # Log the complete cycle
+            total_time = time.time() - start_time
+            logger.info(
+                f"🔌 Worker {self.worker_id} - ✅ COMPLETED cycle in {total_time:.4f}s:\n"
+                f"   - Receive: {recv_time:.4f}s\n"
+                f"   - Process: {process_time:.4f}s\n"
+                f"   - Send: {send_time:.4f}s\n"
+                f"   - Request type: {request_type} → {output_type}\n"
+                f"   - Request count: {request_count}"
+            )
 
             # Update performance stats
             processing_time = time.time() - start_time
             request_count = 1
             token_count = self._count_tokens_in_request(recv_obj)
             self._update_performance_stats(request_count, token_count, processing_time)
+
+    def _get_request_count(self, recv_obj) -> int:
+        """Get the number of requests in a batch."""
+        try:
+            if hasattr(recv_obj, "rids"):
+                return len(recv_obj.rids)
+            elif hasattr(recv_obj, "decode_ids"):
+                return len(recv_obj.decode_ids)
+            elif hasattr(recv_obj, "output_ids"):
+                return len(recv_obj.output_ids) if recv_obj.output_ids else 0
+            else:
+                return 1  # Default to 1 if we can't determine
+        except Exception:
+            return 1  # Fallback to 1 on error
 
     def _count_tokens_in_request(self, recv_obj) -> int:
         """Count the number of tokens in a request for performance monitoring"""
@@ -264,12 +314,23 @@ class DetokenizerManager:
 
     def handle_batch_embedding_out(self, recv_obj: BatchEmbeddingOut):
         # If it is embedding model, no detokenization is needed.
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 📊 Processing BatchEmbeddingOut: {len(recv_obj.rids)} requests, "
+            f"RIDs: {recv_obj.rids[:3]}{'...' if len(recv_obj.rids) > 3 else ''}"
+        )
         return recv_obj
 
     def handle_batch_token_id_out(self, recv_obj: BatchTokenIDOut):
+        start_time = time.time()
         bs = len(recv_obj.rids)
 
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 🔤 Processing BatchTokenIDOut: {bs} requests, "
+            f"RIDs: {recv_obj.rids[:3]}{'...' if bs > 3 else ''}"
+        )
+
         # Initialize decode status
+        init_start = time.time()
         read_ids, surr_ids = [], []
         for i in range(bs):
             rid = recv_obj.rids[i]
@@ -294,7 +355,13 @@ class DetokenizerManager:
             )
             surr_ids.append(s.decode_ids[s.surr_offset : s.read_offset])
 
+        init_time = time.time() - init_start
+        logger.debug(
+            f"🔌 Worker {self.worker_id} - 📝 Decode status initialized in {init_time:.4f}s"
+        )
+
         # TODO(lmzheng): handle skip_special_tokens/spaces_between_special_tokens per request
+        tokenizer_start = time.time()
         surr_texts = self.tokenizer.batch_decode(
             surr_ids,
             skip_special_tokens=recv_obj.skip_special_tokens[0],
@@ -304,6 +371,10 @@ class DetokenizerManager:
             read_ids,
             skip_special_tokens=recv_obj.skip_special_tokens[0],
             spaces_between_special_tokens=recv_obj.spaces_between_special_tokens[0],
+        )
+        tokenizer_time = time.time() - tokenizer_start
+        logger.debug(
+            f"🔌 Worker {self.worker_id} - 🔤 Tokenizer batch_decode completed in {tokenizer_time:.4f}s"
         )
 
         # Incremental decoding
@@ -341,6 +412,15 @@ class DetokenizerManager:
             s.sent_offset = len(output_str)
             output_strs.append(incremental_output)
 
+        # Log completion timing
+        total_time = time.time() - start_time
+        logger.info(
+            f"🔌 Worker {self.worker_id} - ✅ BatchTokenIDOut processing completed in {total_time:.4f}s:\n"
+            f"   - Decode status init: {init_time:.4f}s\n"
+            f"   - Tokenizer decode: {tokenizer_time:.4f}s\n"
+            f"   - Total requests: {bs}"
+        )
+
         return BatchStrOut(
             rids=recv_obj.rids,
             finished_reasons=recv_obj.finished_reasons,
@@ -366,7 +446,19 @@ class DetokenizerManager:
         )
 
     def handle_multimodal_decode_req(self, recv_obj: BatchMultimodalDecodeReq):
+        start_time = time.time()
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 🖼️ Processing BatchMultimodalDecodeReq: {len(recv_obj.rids)} requests, "
+            f"RIDs: {recv_obj.rids[:3]}{'...' if len(recv_obj.rids) > 3 else ''}"
+        )
+
         outputs = self.tokenizer.detokenize(recv_obj)
+
+        total_time = time.time() - start_time
+        logger.info(
+            f"🔌 Worker {self.worker_id} - ✅ BatchMultimodalDecodeReq processing completed in {total_time:.4f}s"
+        )
+
         return BatchMultimodalOut(
             rids=recv_obj.rids,
             finished_reasons=recv_obj.finished_reasons,
