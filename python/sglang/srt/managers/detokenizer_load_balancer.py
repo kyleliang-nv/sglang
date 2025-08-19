@@ -34,7 +34,9 @@ class DetokenizerLoadBalancer:
         self.server_args = server_args
         self.port_args_list = port_args_list
         self.num_workers = server_args.num_detokenizer_workers
-        self.load_balance_method = server_args.detokenizer_worker_load_balance
+        self.load_balance_method = getattr(
+            server_args, "detokenizer_load_balance_method", "round_robin"
+        )
 
         # Initialize ZMQ sockets for each worker
         self.context = zmq.Context()
@@ -44,6 +46,9 @@ class DetokenizerLoadBalancer:
         # Thread safety
         self.lock = threading.Lock()
         self.round_robin_counter = 0
+
+        # Initialize stats logging
+        self._last_stats_log = time.time()
 
         # Request affinity: map request ID to assigned worker
         self.request_worker_map: Dict[str, int] = {}
@@ -213,6 +218,9 @@ class DetokenizerLoadBalancer:
 
         if not request_ids:
             # Fallback to balanced distribution if we can't extract request IDs
+            logger.warning(
+                f"⚠️ No request IDs found in data, using balanced distribution"
+            )
             return self.send_balanced(data)
 
         # Check if all requests in this batch should go to the same worker
@@ -225,9 +233,19 @@ class DetokenizerLoadBalancer:
                 logger.debug(
                     f"🔗 Sent batch with requests {request_ids} to worker {worker_id} (affinity maintained)"
                 )
+                # Log worker distribution stats periodically
+                if (
+                    hasattr(self, "_last_stats_log")
+                    and time.time() - self._last_stats_log > 30
+                ):
+                    self._log_worker_distribution()
+                    self._last_stats_log = time.time()
             return success
         else:
             # Fallback to balanced distribution
+            logger.warning(
+                f"⚠️ Failed to determine worker for requests {request_ids}, using balanced distribution"
+            )
             return self.send_balanced(data)
 
     def handle_response(self, response_data):
@@ -246,48 +264,78 @@ class DetokenizerLoadBalancer:
         try:
             if hasattr(data, "rids"):
                 # BatchTokenIDOut or similar batch objects
-                return data.rids
+                request_ids = data.rids
+                logger.debug(
+                    f"🔍 Extracted {len(request_ids)} request IDs from batch object: {request_ids[:3]}{'...' if len(request_ids) > 3 else ''}"
+                )
+                return request_ids
             elif hasattr(data, "rid"):
                 # Single request objects
-                return [data.rid]
+                request_ids = [data.rid]
+                logger.debug(
+                    f"🔍 Extracted 1 request ID from single object: {request_ids[0]}"
+                )
+                return request_ids
             else:
+                logger.warning(
+                    f"⚠️ No request ID found in data object type: {type(data)}"
+                )
                 return []
-        except Exception:
+        except Exception as e:
+            logger.error(f"❌ Error extracting request IDs from data: {e}")
             return []
 
     def _get_worker_for_requests(self, request_ids: List[str]) -> Optional[int]:
-        """Get the worker ID that should handle these requests to maintain affinity."""
+        """Get the worker ID that should handle these requests with proper request-level affinity."""
         if not request_ids:
             return None
 
-        # Check if any request already has an assigned worker
-        assigned_workers = set()
+        # Check if these are NEW requests (not streaming chunks)
+        new_requests = []
+        existing_requests = []
+
         for rid in request_ids:
             if rid in self.request_worker_map:
-                assigned_workers.add(self.request_worker_map[rid])
+                existing_requests.append(rid)
+            else:
+                new_requests.append(rid)
 
-        if len(assigned_workers) == 1:
-            # All requests should go to the same worker
-            return list(assigned_workers)[0]
-        elif len(assigned_workers) > 1:
-            # Mixed assignment - this shouldn't happen with proper affinity
-            logger.warning(
-                f"⚠️ Mixed worker assignment detected for requests {request_ids}"
-            )
-            # Reassign all to the first worker to fix inconsistency
-            worker_id = list(assigned_workers)[0]
-            for rid in request_ids:
-                self.request_worker_map[rid] = worker_id
-            return worker_id
-        else:
-            # No requests have assigned workers - assign to next available worker
-            worker_id = self.get_worker()
-            for rid in request_ids:
-                self.request_worker_map[rid] = worker_id
+        # Log the request analysis for debugging
+        if new_requests and existing_requests:
             logger.info(
-                f"🔗 Established affinity: requests {request_ids} assigned to worker {worker_id}"
+                f"🔍 Mixed request types: {len(new_requests)} new + {len(existing_requests)} existing"
             )
+        elif new_requests:
+            logger.info(f"🔍 All new requests: {len(new_requests)}")
+        elif existing_requests:
+            logger.info(f"🔍 All existing requests: {len(existing_requests)}")
+
+        if existing_requests:
+            # Use existing worker for streaming consistency
+            worker_id = self.request_worker_map[existing_requests[0]]
+            logger.debug(
+                f"🔗 Maintaining affinity: existing requests {existing_requests} → worker {worker_id}"
+            )
+
+            # Also assign any new requests in this batch to the same worker for consistency
+            if new_requests:
+                for rid in new_requests:
+                    self.request_worker_map[rid] = worker_id
+                logger.info(
+                    f"🔗 Mixed batch: new requests {new_requests} also assigned to worker {worker_id} for consistency"
+                )
+
             return worker_id
+
+        # NEW requests - distribute across workers using load balancing
+        worker_id = self.get_worker()
+        for rid in new_requests:
+            self.request_worker_map[rid] = worker_id
+
+        logger.info(
+            f"🔗 New requests {new_requests} assigned to worker {worker_id} (load balanced)"
+        )
+        return worker_id
 
     def get_stats(self) -> Dict:
         """Get current load balancer statistics."""
@@ -310,6 +358,27 @@ class DetokenizerLoadBalancer:
                 "worker_details": self.worker_stats.copy(),
                 "affinity_stats": affinity_stats,
             }
+
+    def _log_worker_distribution(self):
+        """Log current worker distribution for monitoring."""
+        with self.lock:
+            worker_distribution = self._get_worker_distribution()
+            total_requests = sum(stats["requests_sent"] for stats in self.worker_stats)
+            affinity_map_size = len(self.request_worker_map)
+
+            logger.info(
+                f"📊 Load Balancer Stats - Total Requests: {total_requests}, Affinity Map: {affinity_map_size}"
+            )
+            for worker_id, stats in enumerate(self.worker_stats):
+                if stats["connection_status"] == "connected":
+                    assigned_requests = worker_distribution.get(worker_id, 0)
+                    logger.info(
+                        f"   Worker {worker_id}: Requests Sent: {stats['requests_sent']}, Assigned: {assigned_requests}, Status: {stats['connection_status']}"
+                    )
+                else:
+                    logger.warning(
+                        f"   Worker {worker_id}: Status: {stats['connection_status']} (not receiving requests)"
+                    )
 
     def health_check(self) -> bool:
         """Check health of all workers."""
