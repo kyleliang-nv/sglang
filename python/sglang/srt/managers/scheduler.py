@@ -2746,8 +2746,28 @@ def run_scheduler_process(
             detokenizer_port_args_list is not None
             and len(detokenizer_port_args_list) > 1
         ):
+            logger.info(f"🔍 Load balancer initialization condition met!")
+            logger.info(
+                f"🔍 detokenizer_port_args_list is not None: {detokenizer_port_args_list is not None}"
+            )
+            logger.info(
+                f"🔍 len(detokenizer_port_args_list) > 1: {len(detokenizer_port_args_list) > 1}"
+            )
+            logger.info(f"🔍 About to call init_detokenizer_load_balancer...")
             scheduler.init_detokenizer_load_balancer(detokenizer_port_args_list)
+            logger.info(f"🔍 init_detokenizer_load_balancer call completed")
         else:
+            logger.warning(f"⚠️ Load balancer initialization condition NOT met!")
+            logger.warning(
+                f"🔍 detokenizer_port_args_list is not None: {detokenizer_port_args_list is not None}"
+            )
+            if detokenizer_port_args_list is not None:
+                logger.warning(
+                    f"🔍 len(detokenizer_port_args_list): {len(detokenizer_port_args_list)}"
+                )
+            else:
+                logger.warning(f"🔍 detokenizer_port_args_list is None")
+
             # Ensure send_to_detokenizer is properly set for single worker mode
             if scheduler.send_to_detokenizer is None:
                 logger.warning(
