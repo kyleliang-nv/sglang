@@ -144,6 +144,13 @@ class DataParallelController:
             ready_events.append(ready_event)
 
             # Create a thread for each worker
+            logger.info(
+                f"🔍 Creating thread for DP{dp_rank} with detokenizer_port_args_list: {self.detokenizer_port_args_list}"
+            )
+            if self.detokenizer_port_args_list is not None:
+                logger.info(
+                    f"🔍 detokenizer_port_args_list length: {len(self.detokenizer_port_args_list)}"
+                )
             thread = threading.Thread(
                 target=self.launch_tensor_parallel_group_thread,
                 args=(
@@ -179,6 +186,18 @@ class DataParallelController:
         ready_event: threading.Event,
         detokenizer_port_args_list: Optional[List[PortArgs]] = None,
     ):
+        logger.info(
+            f"🔍 Thread for DP{dp_rank} received detokenizer_port_args_list: {detokenizer_port_args_list}"
+        )
+        if detokenizer_port_args_list is not None:
+            logger.info(
+                f"🔍 Thread for DP{dp_rank} - detokenizer_port_args_list length: {len(detokenizer_port_args_list)}"
+            )
+        else:
+            logger.warning(
+                f"⚠️ Thread for DP{dp_rank} - detokenizer_port_args_list is None!"
+            )
+
         self.launch_tensor_parallel_group(
             server_args, port_args, base_gpu_id, dp_rank, detokenizer_port_args_list
         )
