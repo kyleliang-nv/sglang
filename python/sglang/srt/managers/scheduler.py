@@ -282,11 +282,23 @@ class Scheduler(
         # ALL schedulers should be able to use detokenizer load balancer
         if server_args.skip_tokenizer_init:
             # Directly send to the TokenizerManager
+            logger.info(
+                f"🔍 skip_tokenizer_init is True, using direct tokenizer connection"
+            )
             self.send_to_detokenizer = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_ipc_name, False
             )
         else:
             # Check if we have multiple detokenizer workers
+            logger.info(f"🔍 Checking detokenizer configuration...")
+            logger.info(
+                f"🔍 hasattr num_detokenizer_workers: {hasattr(server_args, 'num_detokenizer_workers')}"
+            )
+            if hasattr(server_args, "num_detokenizer_workers"):
+                logger.info(
+                    f"🔍 num_detokenizer_workers value: {server_args.num_detokenizer_workers}"
+                )
+
             if (
                 hasattr(server_args, "num_detokenizer_workers")
                 and server_args.num_detokenizer_workers > 1
@@ -296,9 +308,12 @@ class Scheduler(
                     f"🔍 Multiple detokenizer workers detected: {server_args.num_detokenizer_workers}"
                 )
                 try:
+                    logger.info(f"🔍 Attempting to import DetokenizerLoadBalancer...")
                     from sglang.srt.managers.detokenizer_load_balancer import (
                         DetokenizerLoadBalancer,
                     )
+
+                    logger.info(f"🔍 DetokenizerLoadBalancer import successful")
 
                     # Note: We'll initialize the load balancer later when we have the port args list
                     self.send_to_detokenizer = None  # Will be set to load balancer
@@ -309,10 +324,16 @@ class Scheduler(
                     logger.info(
                         f"🔍 use_detokenizer_load_balancer set to: {self.use_detokenizer_load_balancer}"
                     )
-                except ImportError:
+                except ImportError as e:
                     logger.warning(
-                        "⚠️ Detokenizer load balancer not available, falling back to single worker"
+                        f"⚠️ Detokenizer load balancer not available, falling back to single worker: {e}"
                     )
+                    self.send_to_detokenizer = get_zmq_socket(
+                        context, zmq.PUSH, port_args.detokenizer_ipc_name, False
+                    )
+                    self.use_detokenizer_load_balancer = False
+                except Exception as e:
+                    logger.error(f"❌ Unexpected error configuring load balancer: {e}")
                     self.send_to_detokenizer = get_zmq_socket(
                         context, zmq.PUSH, port_args.detokenizer_ipc_name, False
                     )
