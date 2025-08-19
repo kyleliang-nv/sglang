@@ -145,6 +145,25 @@ class DetokenizerManager:
             f"🔌 Worker {self.worker_id} - 💾 Max states capacity: {DETOKENIZER_MAX_STATES}"
         )
 
+    def run(self):
+        """Run the detokenizer manager."""
+        start_time = time.time()
+        logger.info(f"🔌 Worker {self.worker_id} - 🚀 DetokenizerManager starting...")
+
+        try:
+            self.event_loop()
+        except Exception as e:
+            total_time = time.time() - start_time
+            logger.error(
+                f"🔌 Worker {self.worker_id} - ❌ DetokenizerManager failed after {total_time:.2f}s: {e}"
+            )
+            raise
+        finally:
+            total_time = time.time() - start_time
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 🛑 DetokenizerManager stopped after {total_time:.2f}s"
+            )
+
     def event_loop(self):
         """The event loop that handles requests"""
         while True:
@@ -177,6 +196,48 @@ class DetokenizerManager:
                 return 1  # Default to 1 if we can't determine
         except Exception:
             return 1  # Fallback to 1 on error
+
+    def _update_performance_stats(
+        self, request_count: int, token_count: int, processing_time: float
+    ):
+        """Update performance statistics"""
+        self.performance_stats["total_requests"] += request_count
+        self.performance_stats["total_tokens_processed"] += token_count
+        self.performance_stats["total_processing_time"] += processing_time
+
+        # Add to history for monitoring
+        self.performance_stats["processing_latency_history"].append(processing_time)
+        if len(self.performance_stats["processing_latency_history"]) > 1000:
+            self.performance_stats["processing_latency_history"].pop(0)
+
+        # Log performance stats periodically
+        current_time = time.time()
+        if (
+            self.performance_stats["enable_detokenizer_logging"]
+            and self.performance_stats["total_requests"]
+            % self.performance_stats["log_interval"]
+            == 0
+            and current_time - self.performance_stats["_last_stats_log"] > 60
+        ):  # Log at most once per minute
+
+            avg_latency = (
+                (
+                    sum(self.performance_stats["processing_latency_history"])
+                    / len(self.performance_stats["processing_latency_history"])
+                )
+                if self.performance_stats["processing_latency_history"]
+                else 0
+            )
+
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 📊 Performance Stats:\n"
+                f"   - Total requests: {self.performance_stats['total_requests']}\n"
+                f"   - Total tokens: {self.performance_stats['total_tokens_processed']}\n"
+                f"   - Total processing time: {self.performance_stats['total_processing_time']:.2f}s\n"
+                f"   - Average latency: {avg_latency:.4f}s\n"
+                f"   - Requests per second: {self.performance_stats['total_requests'] / max(self.performance_stats['total_processing_time'], 0.001):.2f}"
+            )
+            self.performance_stats["_last_stats_log"] = current_time
 
     def trim_matched_stop(
         self, output: Union[str, List[int]], finished_reason: Dict, no_stop_trim: bool
