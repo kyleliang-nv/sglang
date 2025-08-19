@@ -322,6 +322,10 @@ class SchedulerOutputProcessorMixin:
             f"   - Requests: {len(batch.reqs)}, Return logprob: {batch.return_logprob}"
         )
 
+        # Log decode stats for monitoring decode batch performance
+        if hasattr(self, "log_decode_stats"):
+            self.log_decode_stats(can_run_cuda_graph, batch)
+
     def add_input_logprob_return_values(
         self: Scheduler,
         i: int,
