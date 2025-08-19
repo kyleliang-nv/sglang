@@ -1516,12 +1516,32 @@ class TokenizerManager:
             BatchStrOut, BatchEmbeddingOut, BatchMultimodalOut, BatchTokenIDOut
         ],
     ):
+        start_time = time.time()
+        batch_size = len(recv_obj.rids)
+        request_type = type(recv_obj).__name__
+
+        logger.info(
+            f"🔄 TokenizerManager: Starting batch output processing - "
+            f"Type: {request_type}, Requests: {batch_size}, "
+            f"RIDs: {recv_obj.rids[:3]}{'...' if batch_size > 3 else ''}"
+        )
+
+        processed_count = 0
+        error_count = 0
+
         for i, rid in enumerate(recv_obj.rids):
+            request_start_time = time.time()
+            logger.debug(
+                f"📝 TokenizerManager: Processing request {rid} ({i+1}/{batch_size}) - "
+                f"Type: {request_type}"
+            )
+
             state = self.rid_to_state.get(rid, None)
             if state is None:
                 logger.error(
-                    f"Received output for {rid=} but the state was deleted in TokenizerManager."
+                    f"❌ TokenizerManager: Received output for {rid=} but the state was deleted in TokenizerManager."
                 )
+                error_count += 1
                 continue
 
             # Build meta_info and return value
@@ -1532,6 +1552,9 @@ class TokenizerManager:
             }
 
             if getattr(state.obj, "return_logprob", False):
+                logger.debug(
+                    f"📊 TokenizerManager: Processing logprobs for request {rid}"
+                )
                 self.convert_logprob_style(
                     meta_info,
                     state,
@@ -1555,14 +1578,23 @@ class TokenizerManager:
                 meta_info["hidden_states"] = recv_obj.output_hidden_states[i]
 
             if isinstance(recv_obj, BatchStrOut):
+                logger.debug(
+                    f"📝 TokenizerManager: Processing BatchStrOut for request {rid}"
+                )
                 state.text += recv_obj.output_strs[i]
                 if state.obj.stream:
                     state.output_ids.extend(recv_obj.output_ids[i])
                     output_token_ids = state.output_ids[state.last_output_offset :]
                     state.last_output_offset = len(state.output_ids)
+                    logger.debug(
+                        f"🔄 TokenizerManager: Streaming mode for request {rid} - Output tokens: {len(output_token_ids)}"
+                    )
                 else:
                     state.output_ids.extend(recv_obj.output_ids[i])
                     output_token_ids = state.output_ids.copy()
+                    logger.debug(
+                        f"📋 TokenizerManager: Non-streaming mode for request {rid} - Total output tokens: {len(output_token_ids)}"
+                    )
 
                 out_dict = {
                     "text": state.text,
@@ -1570,22 +1602,37 @@ class TokenizerManager:
                     "meta_info": meta_info,
                 }
             elif isinstance(recv_obj, BatchTokenIDOut):
+                logger.debug(
+                    f"🔢 TokenizerManager: Processing BatchTokenIDOut for request {rid}"
+                )
                 if self.server_args.stream_output and state.obj.stream:
                     state.output_ids.extend(recv_obj.output_ids[i])
                     output_token_ids = state.output_ids[state.last_output_offset :]
                     state.last_output_offset = len(state.output_ids)
+                    logger.debug(
+                        f"🔄 TokenizerManager: Stream output enabled for request {rid} - New tokens: {len(output_token_ids)}"
+                    )
                 else:
                     state.output_ids.extend(recv_obj.output_ids[i])
                     output_token_ids = state.output_ids.copy()
+                    logger.debug(
+                        f"📋 TokenizerManager: Stream output disabled for request {rid} - Total tokens: {len(output_token_ids)}"
+                    )
 
                 out_dict = {
                     "output_ids": output_token_ids,
                     "meta_info": meta_info,
                 }
             elif isinstance(recv_obj, BatchMultimodalOut):
+                logger.debug(
+                    f"🖼️ TokenizerManager: Processing BatchMultimodalOut for request {rid}"
+                )
                 raise NotImplementedError("BatchMultimodalOut not implemented")
             else:
                 assert isinstance(recv_obj, BatchEmbeddingOut)
+                logger.debug(
+                    f"🧮 TokenizerManager: Processing BatchEmbeddingOut for request {rid}"
+                )
                 out_dict = {
                     "embedding": recv_obj.embeddings[i],
                     "meta_info": meta_info,
@@ -1593,22 +1640,63 @@ class TokenizerManager:
 
             state.finished = recv_obj.finished_reasons[i] is not None
             if state.finished:
+                logger.info(
+                    f"✅ TokenizerManager: Request {rid} completed - "
+                    f"Finish reason: {recv_obj.finished_reasons[i]}, "
+                    f"Prompt tokens: {recv_obj.prompt_tokens[i]}, "
+                    f"Completion tokens: {recv_obj.completion_tokens[i] if hasattr(recv_obj, 'completion_tokens') else 'N/A'}"
+                )
                 if self.server_args.speculative_algorithm:
                     meta_info["spec_verify_ct"] = recv_obj.spec_verify_ct[i]
+                    logger.debug(
+                        f"🔮 TokenizerManager: Speculative algorithm data added for request {rid}"
+                    )
                 state.finished_time = time.time()
                 meta_info["e2e_latency"] = state.finished_time - state.created_time
                 del self.rid_to_state[rid]
+                logger.debug(
+                    f"🗑️ TokenizerManager: Request state cleaned up for completed request {rid}"
+                )
+            else:
+                logger.debug(
+                    f"⏳ TokenizerManager: Request {rid} still in progress - Streaming chunk processed"
+                )
 
             state.out_list.append(out_dict)
             state.event.set()
 
+            request_time = time.time() - request_start_time
+            logger.debug(
+                f"⏱️ TokenizerManager: Request {rid} processed in {request_time:.4f}s"
+            )
+            processed_count += 1
+
             # Log metrics and dump
             if self.enable_metrics and state.obj.log_metrics:
+                logger.debug(
+                    f"📊 TokenizerManager: Collecting metrics for request {rid}"
+                )
                 self.collect_metrics(state, recv_obj, i)
             if self.dump_requests_folder and state.finished and state.obj.log_metrics:
+                logger.debug(
+                    f"💾 TokenizerManager: Dumping request data for completed request {rid}"
+                )
                 self.dump_requests(state, out_dict)
             if self.crash_dump_folder and state.finished and state.obj.log_metrics:
+                logger.debug(
+                    f"🚨 TokenizerManager: Recording request for crash dump - {rid}"
+                )
                 self.record_request_for_crash_dump(state, out_dict)
+
+        total_time = time.time() - start_time
+        logger.info(
+            f"✅ TokenizerManager: Batch output processing completed in {total_time:.4f}s:\n"
+            f"   - Request type: {request_type}\n"
+            f"   - Total requests: {batch_size}\n"
+            f"   - Successfully processed: {processed_count}\n"
+            f"   - Errors: {error_count}\n"
+            f"   - Average time per request: {total_time/batch_size:.4f}s"
+        )
 
     def convert_logprob_style(
         self,
