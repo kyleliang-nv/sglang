@@ -115,6 +115,9 @@ class DetokenizerManager:
             "enable_detokenizer_logging": getattr(
                 server_args, "enable_detokenizer_logging", False
             ),
+            "enable_worker_logging": getattr(
+                server_args, "enable_detokenizer_worker_logging", False
+            ),
         }
 
         self._request_dispatcher = TypeBasedDispatcher(
@@ -174,41 +177,44 @@ class DetokenizerManager:
             recv_obj = self.recv_from_scheduler.recv_pyobj()
             recv_time = time.time() - recv_start
 
-            # Log what we received
+            # Log what we received (only if worker logging is enabled)
             request_type = type(recv_obj).__name__
             request_count = self._get_request_count(recv_obj)
-            logger.info(
-                f"🔌 Worker {self.worker_id} - 📥 RECEIVED request: {request_type} "
-                f"with {request_count} requests in {recv_time:.4f}s"
-            )
+            if self.performance_stats["enable_worker_logging"]:
+                logger.info(
+                    f"🔌 Worker {self.worker_id} - 📥 RECEIVED request: {request_type} "
+                    f"with {request_count} requests in {recv_time:.4f}s"
+                )
 
             # Time the processing operation
             process_start = time.time()
             output = self._request_dispatcher(recv_obj)
             process_time = time.time() - process_start
 
-            # Log what we're sending back
+            # Log what we're sending back (only if worker logging is enabled)
             output_type = type(output).__name__
-            logger.info(
-                f"🔌 Worker {self.worker_id} - 🔄 PROCESSED request: {request_type} → {output_type} "
-                f"in {process_time:.4f}s"
-            )
+            if self.performance_stats["enable_worker_logging"]:
+                logger.info(
+                    f"🔌 Worker {self.worker_id} - 🔄 PROCESSED request: {request_type} → {output_type} "
+                    f"in {process_time:.4f}s"
+                )
 
             # Time the send operation
             send_start = time.time()
             self.send_to_tokenizer.send_pyobj(output)
             send_time = time.time() - send_start
 
-            # Log the complete cycle
+            # Log the complete cycle (only if worker logging is enabled)
             total_time = time.time() - start_time
-            logger.info(
-                f"🔌 Worker {self.worker_id} - ✅ COMPLETED cycle in {total_time:.4f}s:\n"
-                f"   - Receive: {recv_time:.4f}s\n"
-                f"   - Process: {process_time:.4f}s\n"
-                f"   - Send: {send_time:.4f}s\n"
-                f"   - Request type: {request_type} → {output_type}\n"
-                f"   - Request count: {request_count}"
-            )
+            if self.performance_stats["enable_worker_logging"]:
+                logger.info(
+                    f"🔌 Worker {self.worker_id} - ✅ COMPLETED cycle in {total_time:.4f}s:\n"
+                    f"   - Receive: {recv_time:.4f}s\n"
+                    f"   - Process: {process_time:.4f}s\n"
+                    f"   - Send: {send_time:.4f}s\n"
+                    f"   - Request type: {request_type} → {output_type}\n"
+                    f"   - Request count: {request_count}"
+                )
 
             # Update performance stats
             processing_time = time.time() - start_time
@@ -314,20 +320,22 @@ class DetokenizerManager:
 
     def handle_batch_embedding_out(self, recv_obj: BatchEmbeddingOut):
         # If it is embedding model, no detokenization is needed.
-        logger.info(
-            f"🔌 Worker {self.worker_id} - 📊 Processing BatchEmbeddingOut: {len(recv_obj.rids)} requests, "
-            f"RIDs: {recv_obj.rids[:3]}{'...' if len(recv_obj.rids) > 3 else ''}"
-        )
+        if self.performance_stats["enable_worker_logging"]:
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 📊 Processing BatchEmbeddingOut: {len(recv_obj.rids)} requests, "
+                f"RIDs: {recv_obj.rids[:3]}{'...' if len(recv_obj.rids) > 3 else ''}"
+            )
         return recv_obj
 
     def handle_batch_token_id_out(self, recv_obj: BatchTokenIDOut):
         start_time = time.time()
         bs = len(recv_obj.rids)
 
-        logger.info(
-            f"🔌 Worker {self.worker_id} - 🔤 Processing BatchTokenIDOut: {bs} requests, "
-            f"RIDs: {recv_obj.rids[:3]}{'...' if bs > 3 else ''}"
-        )
+        if self.performance_stats["enable_worker_logging"]:
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 🔤 Processing BatchTokenIDOut: {bs} requests, "
+                f"RIDs: {recv_obj.rids[:3]}{'...' if bs > 3 else ''}"
+            )
 
         # Initialize decode status
         init_start = time.time()
@@ -356,9 +364,10 @@ class DetokenizerManager:
             surr_ids.append(s.decode_ids[s.surr_offset : s.read_offset])
 
         init_time = time.time() - init_start
-        logger.debug(
-            f"🔌 Worker {self.worker_id} - 📝 Decode status initialized in {init_time:.4f}s"
-        )
+        if self.performance_stats["enable_worker_logging"]:
+            logger.debug(
+                f"🔌 Worker {self.worker_id} - 📝 Decode status initialized in {init_time:.4f}s"
+            )
 
         # TODO(lmzheng): handle skip_special_tokens/spaces_between_special_tokens per request
         tokenizer_start = time.time()
@@ -373,9 +382,10 @@ class DetokenizerManager:
             spaces_between_special_tokens=recv_obj.spaces_between_special_tokens[0],
         )
         tokenizer_time = time.time() - tokenizer_start
-        logger.debug(
-            f"🔌 Worker {self.worker_id} - 🔤 Tokenizer batch_decode completed in {tokenizer_time:.4f}s"
-        )
+        if self.performance_stats["enable_worker_logging"]:
+            logger.debug(
+                f"🔌 Worker {self.worker_id} - 🔤 Tokenizer batch_decode completed in {tokenizer_time:.4f}s"
+            )
 
         # Incremental decoding
         output_strs = []
@@ -412,14 +422,15 @@ class DetokenizerManager:
             s.sent_offset = len(output_str)
             output_strs.append(incremental_output)
 
-        # Log completion timing
+        # Log completion timing (only if worker logging is enabled)
         total_time = time.time() - start_time
-        logger.info(
-            f"🔌 Worker {self.worker_id} - ✅ BatchTokenIDOut processing completed in {total_time:.4f}s:\n"
-            f"   - Decode status init: {init_time:.4f}s\n"
-            f"   - Tokenizer decode: {tokenizer_time:.4f}s\n"
-            f"   - Total requests: {bs}"
-        )
+        if self.performance_stats["enable_worker_logging"]:
+            logger.info(
+                f"🔌 Worker {self.worker_id} - ✅ BatchTokenIDOut processing completed in {total_time:.4f}s:\n"
+                f"   - Decode status init: {init_time:.4f}s\n"
+                f"   - Tokenizer decode: {tokenizer_time:.4f}s\n"
+                f"   - Total requests: {bs}"
+            )
 
         return BatchStrOut(
             rids=recv_obj.rids,
@@ -447,17 +458,19 @@ class DetokenizerManager:
 
     def handle_multimodal_decode_req(self, recv_obj: BatchMultimodalDecodeReq):
         start_time = time.time()
-        logger.info(
-            f"🔌 Worker {self.worker_id} - 🖼️ Processing BatchMultimodalDecodeReq: {len(recv_obj.rids)} requests, "
-            f"RIDs: {recv_obj.rids[:3]}{'...' if len(recv_obj.rids) > 3 else ''}"
-        )
+        if self.performance_stats["enable_worker_logging"]:
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 🖼️ Processing BatchMultimodalDecodeReq: {len(recv_obj.rids)} requests, "
+                f"RIDs: {recv_obj.rids[:3]}{'...' if len(recv_obj.rids) > 3 else ''}"
+            )
 
         outputs = self.tokenizer.detokenize(recv_obj)
 
         total_time = time.time() - start_time
-        logger.info(
-            f"🔌 Worker {self.worker_id} - ✅ BatchMultimodalDecodeReq processing completed in {total_time:.4f}s"
-        )
+        if self.performance_stats["enable_worker_logging"]:
+            logger.info(
+                f"🔌 Worker {self.worker_id} - ✅ BatchMultimodalDecodeReq processing completed in {total_time:.4f}s"
+            )
 
         return BatchMultimodalOut(
             rids=recv_obj.rids,

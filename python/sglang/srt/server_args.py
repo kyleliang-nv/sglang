@@ -118,6 +118,7 @@ class ServerArgs:
     enable_prefill_request_flow_logging: bool = False
     enable_detokenizer_logging: bool = False
     detokenizer_log_interval: int = 100
+    enable_detokenizer_worker_logging: bool = False
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
@@ -1132,6 +1133,12 @@ class ServerArgs:
             type=int,
             default=ServerArgs.detokenizer_log_interval,
             help="Log detokenizer performance stats every N requests (default: 100).",
+        )
+        parser.add_argument(
+            "--enable-detokenizer-worker-logging",
+            action="store_true",
+            default=ServerArgs.enable_detokenizer_worker_logging,
+            help="Enable verbose logging for detokenizer worker processes. Shows detailed request processing, timing, and state updates. Disabled by default to reduce log verbosity.",
         )
         parser.add_argument(
             "--crash-dump-folder",
