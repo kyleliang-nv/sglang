@@ -105,7 +105,9 @@ class DataParallelController:
         self.workers = [None] * server_args.dp_size
 
         if server_args.enable_dp_attention:
-            dp_port_args = self.launch_dp_attention_schedulers(server_args, port_args)
+            dp_port_args = self.launch_dp_attention_schedulers(
+                server_args, port_args, self.detokenizer_port_args_list
+            )
             self.control_message_step = server_args.tp_size
         else:
             dp_port_args = self.launch_dp_schedulers(server_args, port_args)
@@ -208,8 +210,15 @@ class DataParallelController:
         while True:
             time.sleep(30 * 24 * 3600)
 
-    def launch_dp_attention_schedulers(self, server_args, port_args):
-        self.launch_tensor_parallel_group(server_args, port_args, 0, None)
+    def launch_dp_attention_schedulers(
+        self,
+        server_args,
+        port_args,
+        detokenizer_port_args_list: Optional[List[PortArgs]] = None,
+    ):
+        self.launch_tensor_parallel_group(
+            server_args, port_args, 0, None, detokenizer_port_args_list
+        )
         dp_port_args = []
         for dp_rank in range(server_args.dp_size):
             dp_port_args.append(PortArgs.init_new(server_args, dp_rank))
