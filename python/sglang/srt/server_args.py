@@ -123,6 +123,8 @@ class ServerArgs:
     tokenizer_manager_queue_log_interval: int = 100
     enable_tokenizer_manager_batch_logging: bool = False
     enable_scheduler_decode_logging: bool = False
+    num_tokenizer_manager_workers: int = 1
+    tokenizer_manager_worker_load_balance: str = "round_robin"
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
@@ -1167,6 +1169,19 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.enable_scheduler_decode_logging,
             help="Enable verbose decode completion logging for scheduler. Shows detailed timing breakdown for decode operations. Disabled by default to reduce log verbosity.",
+        )
+        parser.add_argument(
+            "--num-tokenizer-manager-workers",
+            type=int,
+            default=ServerArgs.num_tokenizer_manager_workers,
+            help="Number of tokenizer manager worker processes. Should match --num-detokenizer-workers for optimal pairing.",
+        )
+        parser.add_argument(
+            "--tokenizer-manager-worker-load-balance",
+            type=str,
+            default=ServerArgs.tokenizer_manager_worker_load_balance,
+            choices=["round_robin", "least_connections", "random"],
+            help="Load balancing strategy for tokenizer manager workers.",
         )
         parser.add_argument(
             "--crash-dump-folder",
@@ -2321,6 +2336,8 @@ class PortArgs:
     scheduler_input_ipc_name: str
     # The ipc filename for detokenizer to receive inputs from scheduler (zmq)
     detokenizer_ipc_name: str
+    # The ipc filename for tokenizer manager to receive inputs from detokenizer (zmq)
+    tokenizer_manager_ipc_name: str
 
     # The port for nccl initialization (torch.dist)
     nccl_port: int
@@ -2351,6 +2368,7 @@ class PortArgs:
                 tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                tokenizer_manager_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 nccl_port=nccl_port,
                 rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 metrics_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
@@ -2372,8 +2390,9 @@ class PortArgs:
             dist_init_host, dist_init_port = dist_init_addr
             port_base = int(dist_init_port) + 1
             detokenizer_port = port_base + 1
-            rpc_port = port_base + 2
-            metrics_port = port_base + 3
+            tokenizer_manager_port = port_base + 2
+            rpc_port = port_base + 3
+            metrics_port = port_base + 4
             if dp_rank is None:
                 # TokenizerManager to DataParallelController
                 scheduler_input_port = port_base + 4
@@ -2384,6 +2403,7 @@ class PortArgs:
                 tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base}",
                 scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port}",
                 detokenizer_ipc_name=f"tcp://{dist_init_host}:{detokenizer_port}",
+                tokenizer_manager_ipc_name=f"tcp://{dist_init_host}:{tokenizer_manager_port}",
                 nccl_port=nccl_port,
                 rpc_ipc_name=f"tcp://{dist_init_host}:{rpc_port}",
                 metrics_ipc_name=f"tcp://{dist_init_host}:{metrics_port}",
