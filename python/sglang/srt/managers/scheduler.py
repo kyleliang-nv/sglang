@@ -2710,6 +2710,20 @@ def run_scheduler_process(
     if server_args.pp_size > 1:
         prefix += f" PP{pp_rank}"
 
+    # Log what we received
+    logger.info(f"🔍 Scheduler {prefix} received arguments:")
+    logger.info(
+        f"🔍 detokenizer_port_args_list is None: {detokenizer_port_args_list is None}"
+    )
+    if detokenizer_port_args_list is not None:
+        logger.info(
+            f"🔍 detokenizer_port_args_list length: {len(detokenizer_port_args_list)}"
+        )
+        for i, port_arg in enumerate(detokenizer_port_args_list):
+            logger.info(f"🔍 Port arg {i}: {port_arg.detokenizer_ipc_name}")
+    else:
+        logger.info(f"🔍 detokenizer_port_args_list is None - this is the problem!")
+
     # Config the process
     setproctitle.setproctitle(f"sglang::scheduler{prefix.replace(' ', '_')}")
     faulthandler.enable()
