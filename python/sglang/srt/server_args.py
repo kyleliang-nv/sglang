@@ -125,6 +125,7 @@ class ServerArgs:
     enable_scheduler_decode_logging: bool = False
     num_tokenizer_manager_workers: int = 1
     tokenizer_manager_worker_load_balance: str = "round_robin"
+    use_combined_workers: bool = True
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
@@ -1182,6 +1183,12 @@ class ServerArgs:
             default=ServerArgs.tokenizer_manager_worker_load_balance,
             choices=["round_robin", "least_connections", "random"],
             help="Load balancing strategy for tokenizer manager workers.",
+        )
+        parser.add_argument(
+            "--use-combined-workers",
+            action="store_true",
+            default=ServerArgs.use_combined_workers,
+            help="Use combined workers (detokenizer + tokenizer manager in single process) for better performance. Disable for separate processes.",
         )
         parser.add_argument(
             "--crash-dump-folder",
