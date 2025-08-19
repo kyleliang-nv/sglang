@@ -1162,6 +1162,18 @@ class Scheduler(
                         recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
                         break
+
+                    # Log tokenizer responses
+                    if hasattr(recv_req, "rids"):
+                        logger.info(
+                            f"📥 Scheduler received response from tokenizer: {type(recv_req).__name__} "
+                            f"with {len(recv_req.rids)} requests, RIDs: {recv_req.rids[:3]}{'...' if len(recv_req.rids) > 3 else ''}"
+                        )
+                    else:
+                        logger.debug(
+                            f"📥 Scheduler received response from tokenizer: {type(recv_req).__name__}"
+                        )
+
                     recv_reqs.append(recv_req)
 
                 while True:
@@ -1187,6 +1199,19 @@ class Scheduler(
 
         if self.input_blocker is not None:
             recv_reqs = self.input_blocker.handle(recv_reqs)
+
+        # Log what we're about to process
+        if recv_reqs:
+            tokenizer_responses = [
+                req
+                for req in recv_reqs
+                if hasattr(req, "rids") and hasattr(req, "output_strs")
+            ]
+            if tokenizer_responses:
+                logger.info(
+                    f"📤 Scheduler processing {len(tokenizer_responses)} tokenizer responses: "
+                    f"{[type(r).__name__ for r in tokenizer_responses]}"
+                )
 
         if self.server_args.enable_dp_attention:
             if self.attn_tp_rank == 0:
@@ -1234,6 +1259,14 @@ class Scheduler(
 
     def process_input_requests(self, recv_reqs: List):
         for recv_req in recv_reqs:
+            # Log what we're processing
+            req_type = type(recv_req).__name__
+            if hasattr(recv_req, "rids"):
+                logger.info(
+                    f"📝 Scheduler processing {req_type} with {len(recv_req.rids)} requests: "
+                    f"RIDs: {recv_req.rids[:3]}{'...' if len(recv_req.rids) > 3 else ''}"
+                )
+
             # If it is a health check generation request and there are running requests, ignore it.
             if is_health_check_generate_req(recv_req) and (
                 self.chunked_req is not None
@@ -1256,13 +1289,27 @@ class Scheduler(
                     )
                     self.send_to_tokenizer.send_pyobj(abort_req)
                     continue
+
+            # Process the request
+            process_start = time.time()
             output = self._request_dispatcher(recv_req)
+            process_time = time.time() - process_start
+
             if output is not None:
+                output_type = type(output).__name__
+                logger.info(
+                    f"📤 Scheduler sending {output_type} to tokenizer in {process_time:.4f}s"
+                )
+
                 if isinstance(output, RpcReqOutput):
                     if self.recv_from_rpc is not None:
                         self.recv_from_rpc.send_pyobj(output)
                 else:
                     self.send_to_tokenizer.send_pyobj(output)
+            else:
+                logger.debug(
+                    f"📝 Scheduler processed {req_type} but no output generated"
+                )
 
     def handle_generate_request(
         self,
