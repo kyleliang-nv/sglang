@@ -73,7 +73,11 @@ class DetokenizerManager:
         self,
         server_args: ServerArgs,
         port_args: PortArgs,
+        worker_id: int = 0,
     ):
+        # Store worker ID for logging
+        self.worker_id = worker_id
+
         # Init inter-process communication
         context = zmq.Context(2)
         self.recv_from_scheduler = get_zmq_socket(
@@ -123,10 +127,23 @@ class DetokenizerManager:
 
         # Initialize performance monitoring
         if self.performance_stats["enable_detokenizer_logging"]:
-            logger.info("🔍 Detokenizer performance monitoring enabled")
             logger.info(
-                f"📊 Log interval: every {self.performance_stats['log_interval']} requests"
+                f"🔌 Worker {self.worker_id} - 🔍 Detokenizer performance monitoring enabled"
             )
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 📊 Log interval: every {self.performance_stats['log_interval']} requests"
+            )
+
+        # Log worker startup
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 🚀 Detokenizer worker started successfully"
+        )
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 📍 IPC endpoint: {port_args.detokenizer_ipc_name}"
+        )
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 💾 Max states capacity: {DETOKENIZER_MAX_STATES}"
+        )
 
     def _update_performance_stats(
         self, request_count: int, token_count: int, processing_time: float
@@ -185,7 +202,7 @@ class DetokenizerManager:
 
         # Log comprehensive stats
         logger.info(
-            f"📊 Detokenizer Performance Stats (last {self.performance_stats['log_interval']} requests):"
+            f"🔌 Worker {self.worker_id} - 📊 Detokenizer Performance Stats (last {self.performance_stats['log_interval']} requests):"
         )
         logger.info(
             f"   {bottleneck_status} - Avg Latency: {avg_recent_latency*1000:.1f}ms, Max: {max_recent_latency*1000:.1f}ms"
@@ -197,13 +214,22 @@ class DetokenizerManager:
             f"   📊 Total: {total_reqs} requests, {total_tokens} tokens, {total_time:.2f}s"
         )
 
+        # Add worker summary for better visibility
+        logger.info(
+            f"🔌 Worker {self.worker_id} - 📋 Summary: Queue={queue_size}, "
+            f"Throughput={throughput:.0f} tokens/sec, "
+            f"Latency={avg_recent_latency*1000:.0f}ms"
+        )
+
         # Log queue size warning if high
         if queue_size > 1000:
             logger.warning(
-                f"⚠️  High detokenizer queue size: {queue_size} requests - potential bottleneck!"
+                f"🔌 Worker {self.worker_id} - ⚠️  High detokenizer queue size: {queue_size} requests - potential bottleneck!"
             )
         elif queue_size > 500:
-            logger.info(f"📋 Moderate detokenizer queue size: {queue_size} requests")
+            logger.info(
+                f"🔌 Worker {self.worker_id} - 📋 Moderate detokenizer queue size: {queue_size} requests"
+            )
 
         # Store queue size history for trend analysis
         if len(self.performance_stats["queue_size_history"]) >= 100:
@@ -216,7 +242,7 @@ class DetokenizerManager:
             avg_queue_size = sum(recent_queue_sizes) / len(recent_queue_sizes)
             if queue_size > avg_queue_size * 1.5:  # 50% increase
                 logger.warning(
-                    f"📈 Queue size increasing: {queue_size} (avg: {avg_queue_size:.1f}) - monitor for bottlenecks"
+                    f"🔌 Worker {self.worker_id} - 📈 Queue size increasing: {queue_size} (avg: {avg_queue_size:.1f}) - monitor for bottlenecks"
                 )
 
     def event_loop(self):
@@ -406,16 +432,19 @@ class LimitedCapacityDict(OrderedDict):
 def run_detokenizer_process(
     server_args: ServerArgs,
     port_args: PortArgs,
+    worker_id: int = 0,
 ):
     kill_itself_when_parent_died()
-    setproctitle.setproctitle("sglang::detokenizer")
+    setproctitle.setproctitle(f"sglang::detokenizer_worker_{worker_id}")
     configure_logger(server_args)
     parent_process = psutil.Process().parent()
 
     try:
-        manager = DetokenizerManager(server_args, port_args)
+        manager = DetokenizerManager(server_args, port_args, worker_id)
         manager.event_loop()
     except Exception:
         traceback = get_exception_traceback()
-        logger.error(f"DetokenizerManager hit an exception: {traceback}")
+        logger.error(
+            f"🔌 Worker {worker_id} - DetokenizerManager hit an exception: {traceback}"
+        )
         parent_process.send_signal(signal.SIGQUIT)
