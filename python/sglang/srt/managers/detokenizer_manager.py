@@ -109,6 +109,7 @@ class DetokenizerManager:
             "queue_size_history": [],
             "processing_latency_history": [],
             "last_log_time": 0.0,
+            "_last_stats_log": 0.0,  # Initialize the missing key
             "log_interval": getattr(
                 server_args, "detokenizer_log_interval", 100
             ),  # Log every 100 requests
