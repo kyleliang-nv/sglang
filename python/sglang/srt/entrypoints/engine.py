@@ -711,6 +711,9 @@ def _launch_subprocesses(
         logger.info(
             f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
         )
+        logger.info(
+            f"🔍 server_args.num_detokenizer_workers: {server_args.num_detokenizer_workers}"
+        )
 
         # Create additional port args for extra workers
         for i in range(1, server_args.num_detokenizer_workers):
@@ -728,6 +731,17 @@ def _launch_subprocesses(
             logger.info(
                 f"🔌 Prepared detokenizer worker {i+1} IPC: {worker_port_args.detokenizer_ipc_name}"
             )
+
+        logger.info(
+            f"🔍 Final detoken_port_args_list length: {len(detoken_port_args_list)}"
+        )
+    else:
+        logger.info(
+            f"🔍 Single detokenizer worker mode, not creating additional port args"
+        )
+        logger.info(
+            f"🔍 server_args.num_detokenizer_workers: {getattr(server_args, 'num_detokenizer_workers', 'NOT_SET')}"
+        )
 
     scheduler_procs = []
     if server_args.dp_size == 1:
@@ -774,7 +788,23 @@ def _launch_subprocesses(
 
                 # If we have multiple detokenizer workers, add the port args list
                 if server_args.num_detokenizer_workers > 1:
+                    logger.info(
+                        f"🔍 Adding detokenizer port args to scheduler {pp_rank}"
+                    )
+                    logger.info(
+                        f"🔍 detoken_port_args_list length: {len(detoken_port_args_list)}"
+                    )
+                    logger.info(
+                        f"🔍 Condition check: server_args.num_detokenizer_workers > 1 = {server_args.num_detokenizer_workers} > 1 = True"
+                    )
                     scheduler_args = scheduler_args + (detoken_port_args_list,)
+                else:
+                    logger.info(
+                        f"🔍 Single detokenizer worker, not adding port args to scheduler {pp_rank}"
+                    )
+                    logger.info(
+                        f"🔍 Condition check: server_args.num_detokenizer_workers > 1 = {getattr(server_args, 'num_detokenizer_workers', 'NOT_SET')} > 1 = False"
+                    )
 
                 proc = mp.Process(
                     target=run_scheduler_process,
@@ -793,7 +823,15 @@ def _launch_subprocesses(
         # Pass detokenizer port args if multiple workers are configured
         controller_args = (server_args, port_args, writer)
         if server_args.num_detokenizer_workers > 1:
+            logger.info(f"🔍 Adding detokenizer port args to data parallel controller")
+            logger.info(
+                f"🔍 detoken_port_args_list length: {len(detoken_port_args_list)}"
+            )
             controller_args = controller_args + (detoken_port_args_list,)
+        else:
+            logger.info(
+                f"🔍 Single detokenizer worker, not adding port args to data parallel controller"
+            )
 
         proc = mp.Process(
             target=run_data_parallel_controller_process,
