@@ -87,6 +87,10 @@ class DetokenizerManager:
             context, zmq.PUSH, port_args.tokenizer_ipc_name, False
         )
 
+        # For load balancer mode, responses need to go back to the scheduler
+        # We'll use the tokenizer socket for now, but the scheduler should handle routing
+        # The real fix is in the load balancer response handling
+
         if server_args.skip_tokenizer_init:
             self.tokenizer = None
         else:

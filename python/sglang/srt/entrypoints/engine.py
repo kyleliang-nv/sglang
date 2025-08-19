@@ -717,11 +717,27 @@ def _launch_subprocesses(
 
         # Create additional port args for extra workers
         for i in range(1, server_args.num_detokenizer_workers):
-            # Create new port args with unique IPC names
+            # Create new port args with TCP sockets for bidirectional communication
+            # Use a different port for each worker to avoid conflicts
+            tcp_port = (
+                port_args.detokenizer_ipc_name.split(":")[-1]
+                if ":" in port_args.detokenizer_ipc_name
+                else "5759"
+            )
+            base_port = int(tcp_port) if tcp_port.isdigit() else 5759
+            worker_port = base_port + i + 1  # Increment port for each worker
+
+            # Get the host from the main port args or use localhost
+            host = (
+                port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
+                if ":" in port_args.detokenizer_ipc_name
+                else "127.0.0.1"
+            )
+
             worker_port_args = PortArgs(
                 tokenizer_ipc_name=port_args.tokenizer_ipc_name,  # Same tokenizer
                 scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,  # Same scheduler
-                detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                detokenizer_ipc_name=f"tcp://{host}:{worker_port}",  # Use TCP for bidirectional communication
                 nccl_port=port_args.nccl_port,
                 rpc_ipc_name=port_args.rpc_ipc_name,
                 metrics_ipc_name=port_args.metrics_ipc_name,
@@ -729,7 +745,7 @@ def _launch_subprocesses(
             detoken_port_args_list.append(worker_port_args)
 
             logger.info(
-                f"🔌 Prepared detokenizer worker {i+1} IPC: {worker_port_args.detokenizer_ipc_name}"
+                f"🔌 Prepared detokenizer worker {i+1} TCP: {worker_port_args.detokenizer_ipc_name}"
             )
 
         logger.info(
@@ -744,14 +760,6 @@ def _launch_subprocesses(
         )
 
     scheduler_procs = []
-    logger.info(f"🔍 DEBUG: server_args.dp_size = {server_args.dp_size}")
-    logger.info(
-        f"🔍 DEBUG: server_args.enable_dp_attention = {getattr(server_args, 'enable_dp_attention', 'NOT_SET')}"
-    )
-    logger.info(
-        f"🔍 DEBUG: Condition check: server_args.dp_size == 1 = {server_args.dp_size} == 1 = {server_args.dp_size == 1}"
-    )
-
     if server_args.dp_size == 1:
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=server_args.enable_memory_saver
