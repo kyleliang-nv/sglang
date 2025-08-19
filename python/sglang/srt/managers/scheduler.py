@@ -286,6 +286,9 @@ class Scheduler(
                     and server_args.num_detokenizer_workers > 1
                 ):
                     # Use load balancer for multiple workers
+                    logger.info(
+                        f"🔍 Multiple detokenizer workers detected: {server_args.num_detokenizer_workers}"
+                    )
                     try:
                         from sglang.srt.managers.detokenizer_load_balancer import (
                             DetokenizerLoadBalancer,
@@ -297,6 +300,9 @@ class Scheduler(
                         logger.info(
                             f"🔀 Scheduler configured to use detokenizer load balancer with {server_args.num_detokenizer_workers} workers"
                         )
+                        logger.info(
+                            f"🔍 use_detokenizer_load_balancer set to: {self.use_detokenizer_load_balancer}"
+                        )
                     except ImportError:
                         logger.warning(
                             "⚠️ Detokenizer load balancer not available, falling back to single worker"
@@ -307,6 +313,7 @@ class Scheduler(
                         self.use_detokenizer_load_balancer = False
                 else:
                     # Send to the DetokenizerManager (single worker)
+                    logger.info(f"🔍 Single detokenizer worker mode")
                     self.send_to_detokenizer = get_zmq_socket(
                         context, zmq.PUSH, port_args.detokenizer_ipc_name, False
                     )
@@ -2566,10 +2573,21 @@ class Scheduler(
 
     def init_detokenizer_load_balancer(self, detokenizer_port_args_list):
         """Initialize the detokenizer load balancer with multiple worker port args."""
+        logger.info(f"🔍 Attempting to initialize detokenizer load balancer...")
+        logger.info(
+            f"🔍 use_detokenizer_load_balancer flag: {getattr(self, 'use_detokenizer_load_balancer', 'NOT_SET')}"
+        )
+        logger.info(
+            f"🔍 detokenizer_port_args_list length: {len(detokenizer_port_args_list) if detokenizer_port_args_list else 'None'}"
+        )
+
         if (
             hasattr(self, "use_detokenizer_load_balancer")
             and self.use_detokenizer_load_balancer
         ):
+            logger.info(
+                f"✅ Load balancer initialization conditions met, proceeding..."
+            )
             try:
                 from sglang.srt.managers.detokenizer_load_balancer import (
                     DetokenizerLoadBalancer,
@@ -2581,6 +2599,9 @@ class Scheduler(
                 # Replace the send_to_detokenizer with the load balancer
                 self.send_to_detokenizer = self.detokenizer_load_balancer
                 logger.info("🔀 Detokenizer load balancer initialized successfully")
+                logger.info(
+                    f"🔍 send_to_detokenizer type: {type(self.send_to_detokenizer)}"
+                )
             except Exception as e:
                 logger.error(f"❌ Failed to initialize detokenizer load balancer: {e}")
                 # Fallback to single worker
@@ -2590,6 +2611,20 @@ class Scheduler(
                 self.send_to_detokenizer = get_zmq_socket(
                     context, zmq.PUSH, self.port_args.detokenizer_ipc_name, False
                 )
+                logger.info(
+                    f"🔍 Fallback: send_to_detokenizer type: {type(self.send_to_detokenizer)}"
+                )
+        else:
+            logger.warning(f"⚠️ Load balancer initialization conditions NOT met:")
+            logger.warning(
+                f"   - hasattr use_detokenizer_load_balancer: {hasattr(self, 'use_detokenizer_load_balancer')}"
+            )
+            logger.warning(
+                f"   - use_detokenizer_load_balancer value: {getattr(self, 'use_detokenizer_load_balancer', 'NOT_SET')}"
+            )
+            logger.warning(
+                f"   - detokenizer_port_args_list: {detokenizer_port_args_list}"
+            )
 
 
 class IdleSleeper:

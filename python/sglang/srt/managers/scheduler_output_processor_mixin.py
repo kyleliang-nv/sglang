@@ -680,6 +680,10 @@ class SchedulerOutputProcessorMixin:
                 )
                 return
 
+            # Log what type of detokenizer interface we're using
+            detokenizer_type = type(self.send_to_detokenizer).__name__
+            logger.debug(f"🔍 Sending to detokenizer type: {detokenizer_type}")
+
             try:
                 self.send_to_detokenizer.send_pyobj(
                     BatchTokenIDOut(
@@ -713,6 +717,8 @@ class SchedulerOutputProcessorMixin:
                 )
             except Exception as e:
                 logger.error(f"❌ Failed to send requests {rids} to detokenizer: {e}")
+                logger.error(f"❌ Detokenizer type: {detokenizer_type}")
+                logger.error(f"❌ Exception type: {type(e).__name__}")
                 # Continue processing instead of crashing
 
     def stream_output_embedding(self: Scheduler, reqs: List[Req]):
@@ -739,6 +745,10 @@ class SchedulerOutputProcessorMixin:
             )
             return
 
+        # Log what type of detokenizer interface we're using
+        detokenizer_type = type(self.send_to_detokenizer).__name__
+        logger.debug(f"🔍 Sending embedding to detokenizer type: {detokenizer_type}")
+
         try:
             self.send_to_detokenizer.send_pyobj(
                 BatchEmbeddingOut(
@@ -749,4 +759,6 @@ class SchedulerOutputProcessorMixin:
             logger.error(
                 f"❌ Failed to send embedding requests {rids} to detokenizer: {e}"
             )
+            logger.error(f"❌ Detokenizer type: {detokenizer_type}")
+            logger.error(f"❌ Exception type: {type(e).__name__}")
             # Continue processing instead of crashing
