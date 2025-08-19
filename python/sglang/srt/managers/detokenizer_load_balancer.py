@@ -1,0 +1,410 @@
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and limitations.
+# See the License for the specific language governing permissions and limitations.
+# ==============================================================================
+"""DetokenizerLoadBalancer distributes work among multiple detokenizer workers."""
+
+import logging
+import random
+import threading
+import time
+from collections import defaultdict
+from typing import Dict, List, Optional
+
+import zmq
+
+from sglang.srt.server_args import ServerArgs
+
+logger = logging.getLogger(__name__)
+
+
+class DetokenizerLoadBalancer:
+    """Load balancer for multiple detokenizer workers."""
+
+    def __init__(self, server_args: ServerArgs, port_args_list: List):
+        self.server_args = server_args
+        self.port_args_list = port_args_list
+        self.num_workers = server_args.num_detokenizer_workers
+        self.load_balance_method = server_args.detokenizer_worker_load_balance
+
+        # Initialize ZMQ sockets for each worker
+        self.context = zmq.Context()
+        self.worker_sockets: List[zmq.Socket] = []
+        self.worker_stats: List[Dict] = []
+
+        # Thread safety
+        self.lock = threading.Lock()
+        self.round_robin_counter = 0
+
+        # Request affinity: map request ID to assigned worker
+        self.request_worker_map: Dict[str, int] = {}
+
+        # Cleanup tracking
+        self.last_cleanup_time = time.time()
+        self.cleanup_interval = 300  # Clean up every 5 minutes
+
+        # Initialize worker connections
+        self._init_worker_connections()
+
+        logger.info(
+            f"🔀 Detokenizer load balancer initialized with {self.num_workers} workers"
+        )
+        logger.info(f"📊 Load balancing method: {self.load_balance_method}")
+        logger.info(f"🔗 Request affinity enabled for streaming consistency")
+
+    def _init_worker_connections(self):
+        """Initialize ZMQ connections to all detokenizer workers."""
+        for i, port_args in enumerate(self.port_args_list):
+            try:
+                # Create PUSH socket to send work to this worker
+                socket = self.context.socket(zmq.PUSH)
+                socket.connect(port_args.detokenizer_ipc_name)
+
+                # Set high water mark to prevent memory issues
+                socket.setsockopt(zmq.SNDHWM, 1000)
+
+                self.worker_sockets.append(socket)
+
+                # Initialize worker statistics
+                self.worker_stats.append(
+                    {
+                        "worker_id": i,
+                        "requests_sent": 0,
+                        "last_request_time": 0,
+                        "connection_status": "connected",
+                        "error_count": 0,
+                    }
+                )
+
+                logger.info(
+                    f"🔌 Connected to detokenizer worker {i} at {port_args.detokenizer_ipc_name}"
+                )
+
+            except Exception as e:
+                logger.error(f"❌ Failed to connect to detokenizer worker {i}: {e}")
+                # Create a dummy socket that will fail gracefully
+                self.worker_sockets.append(None)
+                self.worker_stats.append(
+                    {
+                        "worker_id": i,
+                        "requests_sent": 0,
+                        "last_request_time": 0,
+                        "connection_status": "failed",
+                        "error_count": 1,
+                    }
+                )
+
+    def _get_worker_round_robin(self) -> int:
+        """Get next worker using round-robin strategy."""
+        with self.lock:
+            worker_id = self.round_robin_counter % self.num_workers
+            self.round_robin_counter += 1
+            return worker_id
+
+    def _get_worker_least_connections(self) -> int:
+        """Get worker with least number of requests sent."""
+        with self.lock:
+            min_requests = float("inf")
+            selected_worker = 0
+
+            for i, stats in enumerate(self.worker_stats):
+                if stats["connection_status"] == "connected":
+                    if stats["requests_sent"] < min_requests:
+                        min_requests = stats["requests_sent"]
+                        selected_worker = i
+
+            return selected_worker
+
+    def _get_worker_random(self) -> int:
+        """Get worker randomly."""
+        with self.lock:
+            available_workers = [
+                i
+                for i, stats in enumerate(self.worker_stats)
+                if stats["connection_status"] == "connected"
+            ]
+            if not available_workers:
+                return 0  # Fallback to first worker
+            return random.choice(available_workers)
+
+    def get_worker(self) -> int:
+        """Get the next worker based on the configured load balancing strategy."""
+        if self.load_balance_method == "round_robin":
+            return self._get_worker_round_robin()
+        elif self.load_balance_method == "least_connections":
+            return self._get_worker_least_connections()
+        elif self.load_balance_method == "random":
+            return self._get_worker_random()
+        else:
+            # Default to round-robin
+            return self._get_worker_round_robin()
+
+    def send_to_worker(self, worker_id: int, data) -> bool:
+        """Send data to a specific detokenizer worker."""
+        if (
+            worker_id >= len(self.worker_sockets)
+            or self.worker_sockets[worker_id] is None
+        ):
+            logger.error(f"❌ Invalid worker ID: {worker_id}")
+            return False
+
+        try:
+            # Send the data
+            self.worker_sockets[worker_id].send_pyobj(data)
+
+            # Update statistics
+            with self.lock:
+                self.worker_stats[worker_id]["requests_sent"] += 1
+                self.worker_stats[worker_id]["last_request_time"] = time.time()
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to send to worker {worker_id}: {e}")
+
+            # Update error statistics
+            with self.lock:
+                self.worker_stats[worker_id]["error_count"] += 1
+                if self.worker_stats[worker_id]["error_count"] > 10:
+                    self.worker_stats[worker_id]["connection_status"] = "failed"
+                    logger.error(
+                        f"🚨 Worker {worker_id} marked as failed after 10 errors"
+                    )
+
+            return False
+
+    def send_balanced(self, data):
+        """Send data to the next available worker using load balancing."""
+        max_attempts = self.num_workers
+        attempts = 0
+
+        while attempts < max_attempts:
+            worker_id = self.get_worker()
+
+            if self.send_to_worker(worker_id, data):
+                return True
+
+            attempts += 1
+            logger.warning(
+                f"⚠️ Failed to send to worker {worker_id}, trying next worker..."
+            )
+
+        logger.error(
+            f"❌ Failed to send to any detokenizer worker after {max_attempts} attempts"
+        )
+        return False
+
+    def send_pyobj(self, data):
+        """Interface method expected by scheduler - maintains request affinity for streaming."""
+        # Periodic cleanup to prevent memory leaks
+        self.periodic_cleanup()
+
+        # Extract request IDs from the data to maintain affinity
+        request_ids = self._extract_request_ids(data)
+
+        if not request_ids:
+            # Fallback to balanced distribution if we can't extract request IDs
+            return self.send_balanced(data)
+
+        # Check if all requests in this batch should go to the same worker
+        worker_id = self._get_worker_for_requests(request_ids)
+
+        if worker_id is not None:
+            # Send all requests in batch to the same worker to maintain affinity
+            success = self.send_to_worker(worker_id, data)
+            if success:
+                logger.debug(
+                    f"🔗 Sent batch with requests {request_ids} to worker {worker_id} (affinity maintained)"
+                )
+            return success
+        else:
+            # Fallback to balanced distribution
+            return self.send_balanced(data)
+
+    def handle_response(self, response_data):
+        """Handle response data to clean up completed requests from affinity map."""
+        completed_requests = self.detect_completed_requests(response_data)
+        for rid in completed_requests:
+            self.cleanup_completed_request(rid)
+
+        if completed_requests:
+            logger.debug(
+                f"🧹 Cleaned up {len(completed_requests)} completed requests from affinity map"
+            )
+
+    def _extract_request_ids(self, data) -> List[str]:
+        """Extract request IDs from the data object."""
+        try:
+            if hasattr(data, "rids"):
+                # BatchTokenIDOut or similar batch objects
+                return data.rids
+            elif hasattr(data, "rid"):
+                # Single request objects
+                return [data.rid]
+            else:
+                return []
+        except Exception:
+            return []
+
+    def _get_worker_for_requests(self, request_ids: List[str]) -> Optional[int]:
+        """Get the worker ID that should handle these requests to maintain affinity."""
+        if not request_ids:
+            return None
+
+        # Check if any request already has an assigned worker
+        assigned_workers = set()
+        for rid in request_ids:
+            if rid in self.request_worker_map:
+                assigned_workers.add(self.request_worker_map[rid])
+
+        if len(assigned_workers) == 1:
+            # All requests should go to the same worker
+            return list(assigned_workers)[0]
+        elif len(assigned_workers) > 1:
+            # Mixed assignment - this shouldn't happen with proper affinity
+            logger.warning(
+                f"⚠️ Mixed worker assignment detected for requests {request_ids}"
+            )
+            # Reassign all to the first worker to fix inconsistency
+            worker_id = list(assigned_workers)[0]
+            for rid in request_ids:
+                self.request_worker_map[rid] = worker_id
+            return worker_id
+        else:
+            # No requests have assigned workers - assign to next available worker
+            worker_id = self.get_worker()
+            for rid in request_ids:
+                self.request_worker_map[rid] = worker_id
+            logger.info(
+                f"🔗 Established affinity: requests {request_ids} assigned to worker {worker_id}"
+            )
+            return worker_id
+
+    def get_stats(self) -> Dict:
+        """Get current load balancer statistics."""
+        with self.lock:
+            total_requests = sum(stats["requests_sent"] for stats in self.worker_stats)
+            active_workers = sum(
+                1
+                for stats in self.worker_stats
+                if stats["connection_status"] == "connected"
+            )
+
+            # Get affinity statistics
+            affinity_stats = self.get_affinity_stats()
+
+            return {
+                "total_requests": total_requests,
+                "active_workers": active_workers,
+                "total_workers": self.num_workers,
+                "load_balance_method": self.load_balance_method,
+                "worker_details": self.worker_stats.copy(),
+                "affinity_stats": affinity_stats,
+            }
+
+    def health_check(self) -> bool:
+        """Check health of all workers."""
+        healthy_workers = 0
+
+        for i, stats in enumerate(self.worker_stats):
+            if stats["connection_status"] == "connected":
+                healthy_workers += 1
+
+        health_ratio = healthy_workers / self.num_workers
+
+        if health_ratio < 0.5:
+            logger.error(
+                f"🚨 Critical: Only {healthy_workers}/{self.num_workers} detokenizer workers are healthy"
+            )
+            return False
+        elif health_ratio < 1.0:
+            logger.warning(
+                f"⚠️ Warning: {healthy_workers}/{self.num_workers} detokenizer workers are healthy"
+            )
+
+        return True
+
+    def cleanup_completed_request(self, request_id: str):
+        """Remove completed request from affinity map to prevent memory leaks."""
+        with self.lock:
+            if request_id in self.request_worker_map:
+                del self.request_worker_map[request_id]
+                logger.debug(
+                    f"🧹 Cleaned up completed request {request_id} from affinity map"
+                )
+
+    def get_affinity_stats(self) -> Dict:
+        """Get statistics about request affinity."""
+        with self.lock:
+            return {
+                "total_affinity_mappings": len(self.request_worker_map),
+                "affinity_map_size": len(self.request_worker_map),
+                "sample_request_ids": list(self.request_worker_map.keys())[
+                    :10
+                ],  # First 10 for debugging
+                "worker_distribution": self._get_worker_distribution(),
+            }
+
+    def _get_worker_distribution(self) -> Dict[int, int]:
+        """Get distribution of requests across workers."""
+        distribution = {}
+        for rid, worker_id in self.request_worker_map.items():
+            distribution[worker_id] = distribution.get(worker_id, 0) + 1
+        return distribution
+
+    def detect_completed_requests(self, data) -> List[str]:
+        """Detect completed requests from response data and return their IDs for cleanup."""
+        completed_requests = []
+        try:
+            if hasattr(data, "rids") and hasattr(data, "finished_reasons"):
+                # Check for finished requests
+                for i, rid in enumerate(data.rids):
+                    if (
+                        i < len(data.finished_reasons)
+                        and data.finished_reasons[i] is not None
+                    ):
+                        completed_requests.append(rid)
+            elif hasattr(data, "rid") and hasattr(data, "finished_reason"):
+                # Single request
+                if data.finished_reason is not None:
+                    completed_requests.append(data.rid)
+        except Exception as e:
+            logger.debug(f"Could not detect completed requests: {e}")
+
+        return completed_requests
+
+    def periodic_cleanup(self):
+        """Periodically clean up old affinity mappings to prevent memory leaks."""
+        current_time = time.time()
+        if current_time - self.last_cleanup_time > self.cleanup_interval:
+            with self.lock:
+                initial_size = len(self.request_worker_map)
+                # For now, we'll keep all mappings as we don't have a way to determine
+                # if a request is truly "stale" without additional context
+                # This could be enhanced with request timestamps in the future
+                self.last_cleanup_time = current_time
+                logger.debug(
+                    f"🧹 Periodic cleanup completed, affinity map size: {len(self.request_worker_map)}"
+                )
+
+    def close(self):
+        """Close all worker connections."""
+        for i, socket in enumerate(self.worker_sockets):
+            if socket is not None:
+                try:
+                    socket.close()
+                    logger.info(f"🔌 Closed connection to detokenizer worker {i}")
+                except Exception as e:
+                    logger.error(f"❌ Error closing connection to worker {i}: {e}")
+
+        self.context.term()
+        logger.info("🔌 Detokenizer load balancer closed")
