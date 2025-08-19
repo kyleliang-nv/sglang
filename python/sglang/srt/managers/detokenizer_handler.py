@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""DetokenizerHandler handles only the detokenization logic for paired workers."""
+"""DetokenizerHandler handles only the detokenization logic for separate workers."""
 
 import logging
 import os
@@ -53,7 +53,7 @@ class DecodeStatus:
 
 
 class DetokenizerHandler:
-    """Handles only the detokenization logic for paired workers."""
+    """Handles only the detokenization logic for separate workers."""
 
     def __init__(
         self,

@@ -69,8 +69,8 @@ class CombinedWorker:
         self.recv_from_scheduler = get_zmq_socket(
             context, zmq.PULL, port_args.detokenizer_ipc_name, True
         )
-        self.send_to_scheduler = get_zmq_socket(
-            context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+        self.send_to_tokenizer_manager = get_zmq_socket(
+            context, zmq.PUSH, port_args.tokenizer_manager_ipc_name, False
         )
 
         # Initialize tokenizer for detokenization
@@ -139,9 +139,9 @@ class CombinedWorker:
             output = self._process_request(recv_obj)
             process_time = time.time() - process_start
 
-            # Send result directly to scheduler (no intermediate IPC)
+            # Send result to tokenizer manager for final processing
             send_start = time.time()
-            self.send_to_scheduler.send_pyobj(output)
+            self.send_to_tokenizer_manager.send_pyobj(output)
             send_time = time.time() - send_start
 
             # Log performance if enabled
@@ -207,16 +207,21 @@ class CombinedWorker:
             surr_ids.append(s.decode_ids[s.surr_offset : s.read_offset])
 
         # Perform detokenization
-        surr_texts = self.tokenizer.batch_decode(
-            surr_ids,
-            skip_special_tokens=recv_obj.skip_special_tokens[0],
-            spaces_between_special_tokens=recv_obj.spaces_between_special_tokens[0],
-        )
-        read_texts = self.tokenizer.batch_decode(
-            read_ids,
-            skip_special_tokens=recv_obj.skip_special_tokens[0],
-            spaces_between_special_tokens=recv_obj.spaces_between_special_tokens[0],
-        )
+        if self.tokenizer is None:
+            # Skip tokenizer init mode - return empty strings
+            surr_texts = [""] * len(surr_ids)
+            read_texts = [""] * len(read_ids)
+        else:
+            surr_texts = self.tokenizer.batch_decode(
+                surr_ids,
+                skip_special_tokens=recv_obj.skip_special_tokens[0],
+                spaces_between_special_tokens=recv_obj.spaces_between_special_tokens[0],
+            )
+            read_texts = self.tokenizer.batch_decode(
+                read_ids,
+                skip_special_tokens=recv_obj.skip_special_tokens[0],
+                spaces_between_special_tokens=recv_obj.spaces_between_special_tokens[0],
+            )
 
         # Integrated processing: detokenization + management in one pass
         output_strs = []
@@ -302,7 +307,11 @@ class CombinedWorker:
                 f"🔌 CombinedWorker {self.worker_id} - 🖼️ Processing BatchMultimodalDecodeReq: {len(recv_obj.rids)} requests"
             )
 
-        outputs = self.tokenizer.detokenize(recv_obj)
+        if self.tokenizer is None:
+            # Skip tokenizer init mode - return empty outputs
+            outputs = [""] * len(recv_obj.rids)
+        else:
+            outputs = self.tokenizer.detokenize(recv_obj)
 
         return BatchMultimodalOut(
             rids=recv_obj.rids,

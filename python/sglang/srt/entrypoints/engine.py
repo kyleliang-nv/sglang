@@ -42,6 +42,7 @@ import torch
 import uvloop
 
 from sglang.srt.entrypoints.EngineBase import EngineBase
+from sglang.srt.managers.combined_worker import run_combined_worker_process
 from sglang.srt.managers.data_parallel_controller import (
     run_data_parallel_controller_process,
 )
@@ -733,6 +734,7 @@ def _launch_subprocesses(
                 tokenizer_ipc_name=port_args.tokenizer_ipc_name,  # Same tokenizer
                 scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,  # Same scheduler
                 detokenizer_ipc_name=f"tcp://{host}:{worker_port}",  # Use TCP for bidirectional communication
+                tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,  # Same tokenizer manager
                 nccl_port=port_args.nccl_port,
                 rpc_ipc_name=port_args.rpc_ipc_name,
                 metrics_ipc_name=port_args.metrics_ipc_name,
@@ -874,46 +876,94 @@ def _launch_subprocesses(
             )
         return None, None, None
 
-    # Launch detokenizer process
-    detoken_proc = mp.Process(
-        target=run_detokenizer_process,
-        args=(
-            server_args,
-            port_args,
-            0,  # Main worker ID
-        ),
-    )
-    detoken_proc.start()
-
-    # Launch multiple detokenizer workers if configured
-    detoken_procs = [detoken_proc]  # Keep the first one for backward compatibility
-
-    if server_args.num_detokenizer_workers > 1:
+    # Launch detokenizer process based on configuration
+    if getattr(server_args, "use_combined_workers", True):
         logger.info(
-            f"🚀 Launching {server_args.num_detokenizer_workers} detokenizer workers..."
+            "🚀 Using combined workers (detokenizer + tokenizer manager in single process)"
         )
 
-        # Launch additional detokenizer workers using the pre-configured port args
-        for i in range(1, server_args.num_detokenizer_workers):
-            # Launch additional detokenizer worker
-            worker_proc = mp.Process(
-                target=run_detokenizer_process,
-                args=(
-                    server_args,
-                    detoken_port_args_list[i],  # Use pre-configured port args
-                    i + 1,  # Worker ID (1, 2, 3, etc.)
-                ),
-            )
-            worker_proc.start()
-            detoken_procs.append(worker_proc)
+        # Launch combined worker process
+        detoken_proc = mp.Process(
+            target=run_combined_worker_process,
+            args=(
+                server_args,
+                port_args,
+                0,  # Main worker ID
+            ),
+        )
+        detoken_proc.start()
 
+        # Launch multiple combined workers if configured
+        detoken_procs = [detoken_proc]  # Keep the first one for backward compatibility
+
+        if server_args.num_detokenizer_workers > 1:
             logger.info(
-                f"🔌 Launched detokenizer worker {i+1} (ID: {i+1}) with IPC: {detoken_port_args_list[i].detokenizer_ipc_name}"
+                f"🚀 Launching {server_args.num_detokenizer_workers} combined workers..."
             )
+
+            # Launch additional combined workers using the pre-configured port args
+            for i in range(1, server_args.num_detokenizer_workers):
+                # Launch additional combined worker
+                worker_proc = mp.Process(
+                    target=run_combined_worker_process,
+                    args=(
+                        server_args,
+                        detoken_port_args_list[i],  # Use pre-configured port args
+                        i + 1,  # Worker ID (1, 2, 3, etc.)
+                    ),
+                )
+                worker_proc.start()
+                detoken_procs.append(worker_proc)
+
+                logger.info(
+                    f"🔌 Launched combined worker {i+1} (ID: {i+1}) with IPC: {detoken_port_args_list[i].detokenizer_ipc_name}"
+                )
+        else:
+            logger.info("🔌 Using single combined worker")
     else:
-        logger.info("🔌 Using single detokenizer worker")
+        logger.info("🚀 Using separate detokenizer and tokenizer manager processes")
+
+        # Launch detokenizer process
+        detoken_proc = mp.Process(
+            target=run_detokenizer_process,
+            args=(
+                server_args,
+                port_args,
+                0,  # Main worker ID
+            ),
+        )
+        detoken_proc.start()
+
+        # Launch multiple detokenizer workers if configured
+        detoken_procs = [detoken_proc]  # Keep the first one for backward compatibility
+
+        if server_args.num_detokenizer_workers > 1:
+            logger.info(
+                f"🚀 Launching {server_args.num_detokenizer_workers} detokenizer workers..."
+            )
+
+            # Launch additional detokenizer workers using the pre-configured port args
+            for i in range(1, server_args.num_detokenizer_workers):
+                # Launch additional detokenizer worker
+                worker_proc = mp.Process(
+                    target=run_detokenizer_process,
+                    args=(
+                        server_args,
+                        detoken_port_args_list[i],  # Use pre-configured port args
+                        i + 1,  # Worker ID (1, 2, 3, etc.)
+                    ),
+                )
+                worker_proc.start()
+                detoken_procs.append(worker_proc)
+
+                logger.info(
+                    f"🔌 Launched detokenizer worker {i+1} (ID: {i+1}) with IPC: {detoken_port_args_list[i].detokenizer_ipc_name}"
+                )
+        else:
+            logger.info("🔌 Using single detokenizer worker")
 
     # Launch tokenizer process
+    logger.info("🚀 Launching TokenizerManager process")
     tokenizer_manager = TokenizerManager(server_args, port_args)
 
     # Initialize templates
