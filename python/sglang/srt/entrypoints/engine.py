@@ -816,10 +816,39 @@ def _launch_subprocesses(
                 )
             else:
                 logger.info(
-                    f"🚀 Branch 3: PD-disagg server with combined workers - no port args needed (direct communication)"
+                    f"🚀 Branch 3: PD-disagg server with combined workers - creating port args for load balancer compatibility"
                 )
                 logger.info(
                     f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
+                )
+
+                # For decode servers with combined workers, still create port args for load balancer compatibility
+                # The scheduler expects these even though workers communicate directly
+                for i in range(1, 2):  # Create 1 additional entry (total of 2)
+                    worker_port = 6000 + i
+                    host = (
+                        port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
+                        if ":" in port_args.detokenizer_ipc_name
+                        else "127.0.0.1"
+                    )
+
+                    worker_port_args = PortArgs(
+                        tokenizer_ipc_name=port_args.tokenizer_ipc_name,
+                        scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,
+                        detokenizer_ipc_name=f"tcp://{host}:{worker_port}",
+                        tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,
+                        nccl_port=port_args.nccl_port,
+                        rpc_ipc_name=port_args.rpc_ipc_name,
+                        metrics_ipc_name=port_args.metrics_ipc_name,
+                    )
+                    detoken_port_args_list.append(worker_port_args)
+
+                    logger.info(
+                        f"🔌 Created combined worker port arg {i+1}: {worker_port_args.detokenizer_ipc_name}"
+                    )
+
+                logger.info(
+                    f"🔍 Final detoken_port_args_list length: {len(detoken_port_args_list)}"
                 )
     else:
         logger.info(
@@ -1120,16 +1149,24 @@ def _launch_subprocesses(
         else:
             logger.info("🔌 Using single detokenizer worker")
 
-    # Launch tokenizer process (skip for combined workers since they handle tokenizer management)
+        # Launch tokenizer process (create minimal TokenizerManager for combined workers)
     if use_combined:
         logger.info(
-            "🚀 Combined workers detected - skipping TokenizerManager (handled by workers)"
+            "🚀 Combined workers detected - creating minimal TokenizerManager for HTTP server compatibility"
         )
-        tokenizer_manager = None
 
-        # Initialize templates with a dummy tokenizer for template loading
+        # Create a minimal TokenizerManager for HTTP server compatibility
+        # This provides the interface the HTTP server expects
+        tokenizer_manager = TokenizerManager(server_args, port_args)
+
+        # Initialize templates
         template_manager = TemplateManager()
-        # Note: Combined workers handle their own tokenizer initialization
+        template_manager.initialize_templates(
+            tokenizer_manager=tokenizer_manager,
+            model_path=server_args.model_path,
+            chat_template=server_args.chat_template,
+            completion_template=server_args.completion_template,
+        )
     else:
         logger.info("🚀 Launching TokenizerManager process")
         tokenizer_manager = TokenizerManager(server_args, port_args)
@@ -1167,13 +1204,8 @@ def _launch_subprocesses(
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
 
-    # Set max_req_input_len only if tokenizer_manager exists
-    if tokenizer_manager is not None:
-        tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
-    else:
-        logger.info(
-            "🚀 Combined workers mode - skipping tokenizer_manager.max_req_input_len (handled by workers)"
-        )
+    # Set max_req_input_len for tokenizer_manager
+    tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
 
     # Return detokenizer information for multiple workers
     # Always return 3 values for backward compatibility
