@@ -722,13 +722,25 @@ def _launch_subprocesses(
             and getattr(server_args, "use_combined_workers", True)
         )
 
+        # Debug logging for port args creation
+        logger.info(
+            f"🔍 Debug: server_args.num_detokenizer_workers = {getattr(server_args, 'num_detokenizer_workers', 'NOT_SET')}"
+        )
+        logger.info(f"🔍 Debug: use_combined_for_pd = {use_combined_for_pd}")
+        logger.info(
+            f"🔍 Debug: disaggregation_mode = {getattr(server_args, 'disaggregation_mode', 'NOT_SET')}"
+        )
+        logger.info(
+            f"🔍 Debug: use_combined_workers = {getattr(server_args, 'use_combined_workers', 'NOT_SET')}"
+        )
+
         # For PD-disagg servers, always create port args (either for workers or for load balancer)
         if hasattr(
             server_args, "disaggregation_mode"
         ) and server_args.disaggregation_mode in ["prefill", "decode"]:
             if server_args.num_detokenizer_workers > 1 and not use_combined_for_pd:
                 logger.info(
-                    f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
+                    f"🚀 Branch 1: Multiple workers needed - preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
                 )
                 logger.info(
                     f"🔍 server_args.num_detokenizer_workers: {server_args.num_detokenizer_workers}"
@@ -768,7 +780,7 @@ def _launch_subprocesses(
                 )
             elif not use_combined_for_pd:
                 logger.info(
-                    f"🔍 PD-disagg server detected - creating port args list for schedulers (no workers needed)"
+                    f"🚀 Branch 2: PD-disagg server detected - creating port args list for schedulers (no workers needed)"
                 )
                 logger.info(
                     f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
@@ -798,13 +810,17 @@ def _launch_subprocesses(
                     logger.info(
                         f"🔌 Created PD-disagg port arg {i+1}: {worker_port_args.detokenizer_ipc_name}"
                     )
-        else:
-            logger.info(
-                f"🔍 PD-disagg server with combined workers - no port args needed (direct communication)"
-            )
-            logger.info(
-                f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
-            )
+
+                logger.info(
+                    f"🔍 Final detoken_port_args_list length: {len(detoken_port_args_list)}"
+                )
+            else:
+                logger.info(
+                    f"🚀 Branch 3: PD-disagg server with combined workers - no port args needed (direct communication)"
+                )
+                logger.info(
+                    f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
+                )
     else:
         logger.info(
             f"🔍 Single detokenizer worker mode, not creating additional port args"
