@@ -708,13 +708,21 @@ def _launch_subprocesses(
     detoken_port_args_list = [port_args]  # Default to single worker
 
     # Create additional port args for multiple workers BEFORE launching schedulers
-    # For PD-disagg servers, always create the list even if not launching workers
+    # For PD-disagg servers, create the list only if NOT using combined workers
+    # (Combined workers communicate directly with scheduler, no port args needed)
     if server_args.num_detokenizer_workers > 1 or (
         hasattr(server_args, "disaggregation_mode")
         and server_args.disaggregation_mode in ["prefill", "decode"]
     ):
 
-        if server_args.num_detokenizer_workers > 1:
+        # Check if we're using combined workers
+        use_combined_for_pd = (
+            hasattr(server_args, "disaggregation_mode")
+            and server_args.disaggregation_mode in ["prefill", "decode"]
+            and getattr(server_args, "use_combined_workers", True)
+        )
+
+        if server_args.num_detokenizer_workers > 1 and not use_combined_for_pd:
             logger.info(
                 f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
             )
@@ -754,9 +762,41 @@ def _launch_subprocesses(
             logger.info(
                 f"🔍 Final detoken_port_args_list length: {len(detoken_port_args_list)}"
             )
-        else:
+        elif not use_combined_for_pd:
             logger.info(
                 f"🔍 PD-disagg server detected - creating port args list for schedulers (no workers needed)"
+            )
+            logger.info(
+                f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
+            )
+
+            # For PD-disagg servers, create at least 2 port args to satisfy load balancer condition
+            # This ensures schedulers can initialize their load balancers properly
+            for i in range(1, 2):  # Create 1 additional entry (total of 2)
+                worker_port = 6000 + i
+                host = (
+                    port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
+                    if ":" in port_args.detokenizer_ipc_name
+                    else "127.0.0.1"
+                )
+
+                worker_port_args = PortArgs(
+                    tokenizer_ipc_name=port_args.tokenizer_ipc_name,
+                    scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,
+                    detokenizer_ipc_name=f"tcp://{host}:{worker_port}",
+                    tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,
+                    nccl_port=port_args.nccl_port,
+                    rpc_ipc_name=port_args.rpc_ipc_name,
+                    metrics_ipc_name=port_args.metrics_ipc_name,
+                )
+                detoken_port_args_list.append(worker_port_args)
+
+                logger.info(
+                    f"🔌 Created PD-disagg port arg {i+1}: {worker_port_args.detokenizer_ipc_name}"
+                )
+        else:
+            logger.info(
+                f"🔍 PD-disagg server with combined workers - no port args needed (direct communication)"
             )
             logger.info(
                 f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
@@ -812,11 +852,14 @@ def _launch_subprocesses(
                     None,
                 )
 
-                # If we have multiple detokenizer workers OR PD-disagg mode, add the port args list
-                if server_args.num_detokenizer_workers > 1 or (
-                    hasattr(server_args, "disaggregation_mode")
-                    and server_args.disaggregation_mode in ["prefill", "decode"]
-                ):
+                # If we have multiple detokenizer workers OR PD-disagg mode (but not combined workers), add the port args list
+                if (
+                    server_args.num_detokenizer_workers > 1
+                    or (
+                        hasattr(server_args, "disaggregation_mode")
+                        and server_args.disaggregation_mode in ["prefill", "decode"]
+                    )
+                ) and len(detoken_port_args_list) > 0:
                     logger.info(
                         f"🔍 Adding detokenizer port args to scheduler {pp_rank}"
                     )
@@ -829,10 +872,10 @@ def _launch_subprocesses(
                     scheduler_args = scheduler_args + (detoken_port_args_list,)
                 else:
                     logger.info(
-                        f"🔍 Single detokenizer worker, not adding port args to scheduler {pp_rank}"
+                        f"🔍 No detokenizer port args to add to scheduler {pp_rank}"
                     )
                     logger.info(
-                        f"🔍 Condition check: server_args.num_detokenizer_workers > 1 = {getattr(server_args, 'num_detokenizer_workers', 'NOT_SET')} > 1 = False"
+                        f"🔍 Condition check: Combined workers or single worker mode"
                     )
 
                 proc = mp.Process(
@@ -849,12 +892,15 @@ def _launch_subprocesses(
         reader, writer = mp.Pipe(duplex=False)
         scheduler_pipe_readers = [reader]
 
-        # Pass detokenizer port args if multiple workers are configured OR PD-disagg mode
+        # Pass detokenizer port args if multiple workers are configured OR PD-disagg mode (but not combined workers)
         controller_args = (server_args, port_args, writer)
-        if server_args.num_detokenizer_workers > 1 or (
-            hasattr(server_args, "disaggregation_mode")
-            and server_args.disaggregation_mode in ["prefill", "decode"]
-        ):
+        if (
+            server_args.num_detokenizer_workers > 1
+            or (
+                hasattr(server_args, "disaggregation_mode")
+                and server_args.disaggregation_mode in ["prefill", "decode"]
+            )
+        ) and len(detoken_port_args_list) > 0:
             logger.info(f"🔍 Adding detokenizer port args to data parallel controller")
             logger.info(
                 f"🔍 detoken_port_args_list length: {len(detoken_port_args_list)}"
@@ -862,7 +908,7 @@ def _launch_subprocesses(
             controller_args = controller_args + (detoken_port_args_list,)
         else:
             logger.info(
-                f"🔍 Single detokenizer worker, not adding port args to data parallel controller"
+                f"🔍 No detokenizer port args to add to data parallel controller"
             )
 
         proc = mp.Process(
@@ -952,6 +998,12 @@ def _launch_subprocesses(
                 )
         else:
             logger.info("🔌 Using single combined worker")
+
+        # Give combined workers a moment to initialize their connections
+        if use_combined:
+            logger.info("🚀 Waiting for combined workers to initialize connections...")
+            time.sleep(2)  # Brief delay for ZMQ socket initialization
+            logger.info("🚀 Combined workers initialization complete")
     else:
         logger.info(
             "🚀 Using standard detokenizer workers (separate or combined disabled)"
@@ -996,18 +1048,28 @@ def _launch_subprocesses(
         else:
             logger.info("🔌 Using single detokenizer worker")
 
-    # Launch tokenizer process
-    logger.info("🚀 Launching TokenizerManager process")
-    tokenizer_manager = TokenizerManager(server_args, port_args)
+    # Launch tokenizer process (skip for combined workers since they handle tokenizer management)
+    if use_combined:
+        logger.info(
+            "🚀 Combined workers detected - skipping TokenizerManager (handled by workers)"
+        )
+        tokenizer_manager = None
 
-    # Initialize templates
-    template_manager = TemplateManager()
-    template_manager.initialize_templates(
-        tokenizer_manager=tokenizer_manager,
-        model_path=server_args.model_path,
-        chat_template=server_args.chat_template,
-        completion_template=server_args.completion_template,
-    )
+        # Initialize templates with a dummy tokenizer for template loading
+        template_manager = TemplateManager()
+        # Note: Combined workers handle their own tokenizer initialization
+    else:
+        logger.info("🚀 Launching TokenizerManager process")
+        tokenizer_manager = TokenizerManager(server_args, port_args)
+
+        # Initialize templates
+        template_manager = TemplateManager()
+        template_manager.initialize_templates(
+            tokenizer_manager=tokenizer_manager,
+            model_path=server_args.model_path,
+            chat_template=server_args.chat_template,
+            completion_template=server_args.completion_template,
+        )
 
     # Wait for the model to finish loading
     scheduler_infos = []
@@ -1032,7 +1094,14 @@ def _launch_subprocesses(
 
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
-    tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
+
+    # Set max_req_input_len only if tokenizer_manager exists
+    if tokenizer_manager is not None:
+        tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
+    else:
+        logger.info(
+            "🚀 Combined workers mode - skipping tokenizer_manager.max_req_input_len (handled by workers)"
+        )
 
     # Return detokenizer information for multiple workers
     # Always return 3 values for backward compatibility
