@@ -305,13 +305,19 @@ class Scheduler(
                     f"🔍 num_detokenizer_workers value: {server_args.num_detokenizer_workers}"
                 )
 
-            if (
+            # Check if we should use load balancer (multiple workers OR PD-disagg mode)
+            should_use_load_balancer = (
                 hasattr(server_args, "num_detokenizer_workers")
                 and server_args.num_detokenizer_workers > 1
-            ):
-                # Use load balancer for multiple workers
+            ) or (
+                hasattr(server_args, "disaggregation_mode")
+                and server_args.disaggregation_mode in ["prefill", "decode"]
+            )
+
+            if should_use_load_balancer:
+                # Use load balancer for multiple workers or PD-disagg compatibility
                 logger.info(
-                    f"🔍 Multiple detokenizer workers detected: {server_args.num_detokenizer_workers}"
+                    f"🔍 Load balancer needed: multiple workers ({server_args.num_detokenizer_workers}) or PD-disagg mode ({getattr(server_args, 'disaggregation_mode', 'None')})"
                 )
                 try:
                     logger.info(f"🔍 Attempting to import DetokenizerLoadBalancer...")
@@ -325,7 +331,7 @@ class Scheduler(
                     self.send_to_detokenizer = None  # Will be set to load balancer
                     self.use_detokenizer_load_balancer = True
                     logger.info(
-                        f"🔀 Scheduler configured to use detokenizer load balancer with {server_args.num_detokenizer_workers} workers"
+                        f"🔀 Scheduler configured to use detokenizer load balancer"
                     )
                     logger.info(
                         f"🔍 use_detokenizer_load_balancer set to: {self.use_detokenizer_load_balancer}"
