@@ -964,16 +964,38 @@ def _launch_subprocesses(
             "🚀 Using combined workers (detokenizer + tokenizer manager in single process)"
         )
 
-        # Launch combined worker process
+        # Launch main combined worker process (worker 0)
+        # Create unique port args for main worker
+        main_worker_port = 6000
+        host = (
+            port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
+            if ":" in port_args.detokenizer_ipc_name
+            else "127.0.0.1"
+        )
+
+        main_worker_port_args = PortArgs(
+            tokenizer_ipc_name=port_args.tokenizer_ipc_name,
+            scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,
+            detokenizer_ipc_name=f"tcp://{host}:{main_worker_port}",  # Unique port for main worker
+            tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,
+            nccl_port=port_args.nccl_port,
+            rpc_ipc_name=port_args.rpc_ipc_name,
+            metrics_ipc_name=port_args.metrics_ipc_name,
+        )
+
         detoken_proc = mp.Process(
             target=run_combined_worker_process,
             args=(
                 server_args,
-                port_args,
+                main_worker_port_args,  # Use unique port args for main worker
                 0,  # Main worker ID
             ),
         )
         detoken_proc.start()
+
+        logger.info(
+            f"🔌 Launched main combined worker (ID: 0) with IPC: {main_worker_port_args.detokenizer_ipc_name}"
+        )
 
         # Launch multiple combined workers if configured
         detoken_procs = [detoken_proc]  # Keep the first one for backward compatibility
@@ -982,15 +1004,37 @@ def _launch_subprocesses(
             logger.info(
                 f"🚀 Launching {server_args.num_detokenizer_workers} combined workers..."
             )
+            logger.info(
+                f"🔍 Port range: 6000-{6000 + server_args.num_detokenizer_workers - 1}"
+            )
 
-            # Launch additional combined workers using the main port args (direct communication)
+            # Launch additional combined workers using unique ports for each worker
             for i in range(1, server_args.num_detokenizer_workers):
+                # Create unique port args for each worker
+                worker_port = 6000 + i
+                host = (
+                    port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
+                    if ":" in port_args.detokenizer_ipc_name
+                    else "127.0.0.1"
+                )
+
+                # Create unique port args for this worker
+                worker_port_args = PortArgs(
+                    tokenizer_ipc_name=port_args.tokenizer_ipc_name,
+                    scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,
+                    detokenizer_ipc_name=f"tcp://{host}:{worker_port}",  # Unique port for each worker
+                    tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,
+                    nccl_port=port_args.nccl_port,
+                    rpc_ipc_name=port_args.rpc_ipc_name,
+                    metrics_ipc_name=port_args.metrics_ipc_name,
+                )
+
                 # Launch additional combined worker
                 worker_proc = mp.Process(
                     target=run_combined_worker_process,
                     args=(
                         server_args,
-                        port_args,  # Use main port args for all combined workers
+                        worker_port_args,  # Use unique port args for each worker
                         i + 1,  # Worker ID (1, 2, 3, etc.)
                     ),
                 )
@@ -998,7 +1042,7 @@ def _launch_subprocesses(
                 detoken_procs.append(worker_proc)
 
                 logger.info(
-                    f"🔌 Launched combined worker {i+1} (ID: {i+1}) with IPC: {port_args.detokenizer_ipc_name}"
+                    f"🔌 Launched combined worker {i+1} (ID: {i+1}) with IPC: {worker_port_args.detokenizer_ipc_name}"
                 )
         else:
             logger.info("🔌 Using single combined worker")
