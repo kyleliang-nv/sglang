@@ -89,7 +89,11 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
 
 # Build and install NVSHMEM
 RUN cd /sgl-workspace/nvshmem && \
-    if [ "$BUILD_TYPE" = "blackwell" ]; then CUDA_ARCH=100; else CUDA_ARCH=90; fi \
+    if [ "$BUILD_TYPE" = "blackwell" ]; then \
+        export CUDA_ARCH=100; \
+    else \
+        export CUDA_ARCH=90; \
+    fi \
     export NVSHMEM_SHMEM_SUPPORT=0 && \
     export NVSHMEM_UCX_SUPPORT=0 && \
     export NVSHMEM_USE_NCCL=0 && \
