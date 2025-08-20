@@ -765,17 +765,7 @@ def _launch_subprocesses(
         )
 
     scheduler_procs = []
-
-    # Skip scheduler creation for prefill servers in PD-disagg mode
-    if (
-        hasattr(server_args, "disaggregation_mode")
-        and server_args.disaggregation_mode == "prefill"
-    ):
-        logger.info(
-            "🚀 Prefill server detected - skipping scheduler creation (not needed)"
-        )
-        scheduler_pipe_readers = []
-    elif server_args.dp_size == 1:
+    if server_args.dp_size == 1:
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=server_args.enable_memory_saver
         )
@@ -875,30 +865,13 @@ def _launch_subprocesses(
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
         # so they can just wait here.
 
-        # Handle prefill servers (no schedulers to wait for)
-        if (
-            hasattr(server_args, "disaggregation_mode")
-            and server_args.disaggregation_mode == "prefill"
-        ):
-            logger.info(
-                "🚀 Prefill server on non-zero rank - no schedulers to wait for"
-            )
-        else:
-            # Normal mode - wait for schedulers
-            for reader in scheduler_pipe_readers:
-                data = reader.recv()
-                assert data["status"] == "ready"
+        # Wait for schedulers to be ready
+        for reader in scheduler_pipe_readers:
+            data = reader.recv()
+            assert data["status"] == "ready"
 
         if os.getenv("SGLANG_BLOCK_NONZERO_RANK_CHILDREN") == "0":
             # When using `Engine` as a Python API, we don't want to block here.
-            return None, None, None
-
-        # For prefill servers, no need to wait for schedulers or launch health check
-        if (
-            hasattr(server_args, "disaggregation_mode")
-            and server_args.disaggregation_mode == "prefill"
-        ):
-            logger.info("🚀 Prefill server on non-zero rank - returning early")
             return None, None, None
 
         launch_dummy_health_check_server(
@@ -1023,35 +996,23 @@ def _launch_subprocesses(
     # Wait for the model to finish loading
     scheduler_infos = []
 
-    # Handle prefill servers in PD-disagg mode (no schedulers to wait for)
-    if (
-        hasattr(server_args, "disaggregation_mode")
-        and server_args.disaggregation_mode == "prefill"
-    ):
-        logger.info(
-            "🚀 Prefill server - no schedulers to wait for, creating dummy scheduler info"
-        )
-        scheduler_infos = [
-            {"status": "ready", "max_req_input_len": 8192}
-        ]  # Default values
-    else:
-        # Normal mode - wait for schedulers
-        for i in range(len(scheduler_pipe_readers)):
-            try:
-                data = scheduler_pipe_readers[i].recv()
-            except EOFError:
-                logger.error(
-                    f"Rank {i} scheduler is dead. Please check if there are relevant logs."
-                )
-                scheduler_procs[i].join()
-                logger.error(f"Exit code: {scheduler_procs[i].exitcode}")
-                raise
+    # Wait for schedulers to be ready
+    for i in range(len(scheduler_pipe_readers)):
+        try:
+            data = scheduler_pipe_readers[i].recv()
+        except EOFError:
+            logger.error(
+                f"Rank {i} scheduler is dead. Please check if there are relevant logs."
+            )
+            scheduler_procs[i].join()
+            logger.error(f"Exit code: {scheduler_procs[i].exitcode}")
+            raise
 
-            if data["status"] != "ready":
-                raise RuntimeError(
-                    "Initialization failed. Please see the error messages above."
-                )
-            scheduler_infos.append(data)
+        if data["status"] != "ready":
+            raise RuntimeError(
+                "Initialization failed. Please see the error messages above."
+            )
+        scheduler_infos.append(data)
 
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
