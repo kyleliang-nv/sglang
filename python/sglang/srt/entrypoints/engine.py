@@ -708,60 +708,7 @@ def _launch_subprocesses(
     detoken_port_args_list = [port_args]  # Default to single worker
 
     # Create additional port args for multiple workers BEFORE launching schedulers
-    # For prefill servers, we still need the port args list for schedulers, but won't launch workers
-    if (
-        hasattr(server_args, "disaggregation_mode")
-        and server_args.disaggregation_mode == "prefill"
-    ):
-        logger.info(
-            "🚀 Prefill server detected - creating minimal detokenizer port configuration for schedulers"
-        )
-        # Still create the port args list for schedulers, but don't launch workers
-        if server_args.num_detokenizer_workers > 1:
-            logger.info(
-                f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations for schedulers..."
-            )
-            logger.info(
-                f"🔍 server_args.num_detokenizer_workers: {server_args.num_detokenizer_workers}"
-            )
-
-            # Create additional port args for extra workers
-            for i in range(1, server_args.num_detokenizer_workers):
-                # Create new port args with TCP sockets for bidirectional communication
-                # Use a completely different port range to avoid conflicts with scheduler ports
-                # Start from port 6000 for detokenizer workers
-                worker_port = 6000 + i
-
-                # Get the host from the main port args or use localhost
-                host = (
-                    port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
-                    if ":" in port_args.detokenizer_ipc_name
-                    else "127.0.0.1"
-                )
-
-                worker_port_args = PortArgs(
-                    tokenizer_ipc_name=port_args.tokenizer_ipc_name,  # Same tokenizer
-                    scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,  # Same scheduler
-                    detokenizer_ipc_name=f"tcp://{host}:{worker_port}",  # Use TCP for bidirectional communication
-                    tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,  # Same tokenizer manager
-                    nccl_port=port_args.nccl_port,
-                    rpc_ipc_name=port_args.rpc_ipc_name,
-                    metrics_ipc_name=port_args.metrics_ipc_name,
-                )
-                detoken_port_args_list.append(worker_port_args)
-
-                logger.info(
-                    f"🔌 Prepared detokenizer worker {i+1} TCP: {worker_port_args.detokenizer_ipc_name}"
-                )
-
-            logger.info(
-                f"🔍 Final detoken_port_args_list length: {len(detoken_port_args_list)}"
-            )
-        else:
-            logger.info(
-                f"🔍 Single detokenizer worker mode for prefill server, not creating additional port args"
-            )
-    elif server_args.num_detokenizer_workers > 1:
+    if server_args.num_detokenizer_workers > 1:
         logger.info(
             f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
         )
@@ -931,16 +878,19 @@ def _launch_subprocesses(
         return None, None, None
 
     # Launch detokenizer process based on configuration
-    # Skip detokenizer workers for prefill servers in PD-disagg mode
+    # Use original method for prefill servers, new combined method for decode servers
     if (
         hasattr(server_args, "disaggregation_mode")
         and server_args.disaggregation_mode == "prefill"
     ):
         logger.info(
-            "🚀 Prefill server detected - skipping detokenizer workers (not needed)"
+            "🚀 Prefill server detected - using standard detokenizer workers (original method)"
         )
-        detoken_procs = []
-    elif getattr(server_args, "use_combined_workers", True):
+        use_combined = False
+    else:
+        use_combined = getattr(server_args, "use_combined_workers", True)
+
+    if use_combined:
         logger.info(
             "🚀 Using combined workers (detokenizer + tokenizer manager in single process)"
         )
@@ -984,7 +934,9 @@ def _launch_subprocesses(
         else:
             logger.info("🔌 Using single combined worker")
     else:
-        logger.info("🚀 Using separate detokenizer and tokenizer manager processes")
+        logger.info(
+            "🚀 Using standard detokenizer workers (separate or combined disabled)"
+        )
 
         # Launch detokenizer process
         detoken_proc = mp.Process(
