@@ -305,17 +305,14 @@ class Scheduler(
                     f"🔍 num_detokenizer_workers value: {server_args.num_detokenizer_workers}"
                 )
 
-            # Check if we should use load balancer (multiple workers OR PD-disagg mode, but NOT combined workers)
+            # Check if we should use load balancer (multiple workers OR PD-disagg mode)
             should_use_load_balancer = (
-                (
-                    hasattr(server_args, "num_detokenizer_workers")
-                    and server_args.num_detokenizer_workers > 1
-                )
-                or (
-                    hasattr(server_args, "disaggregation_mode")
-                    and server_args.disaggregation_mode in ["prefill", "decode"]
-                )
-            ) and not getattr(server_args, "use_combined_workers", False)
+                hasattr(server_args, "num_detokenizer_workers")
+                and server_args.num_detokenizer_workers > 1
+            ) or (
+                hasattr(server_args, "disaggregation_mode")
+                and server_args.disaggregation_mode in ["prefill", "decode"]
+            )
 
             if should_use_load_balancer:
                 # Use load balancer for multiple workers or PD-disagg compatibility
@@ -354,23 +351,12 @@ class Scheduler(
                     )
                     self.use_detokenizer_load_balancer = False
             else:
-                # Check if we're using combined workers
-                if getattr(server_args, "use_combined_workers", False):
-                    logger.info(
-                        f"🔍 Combined workers mode - scheduler will communicate directly with workers"
-                    )
-                    # For combined workers, we don't need send_to_detokenizer
-                    # The workers will send responses back to the scheduler via scheduler_input_ipc_name
-                    self.send_to_detokenizer = None
-                    self.use_detokenizer_load_balancer = False
-                    self.use_combined_workers = True
-                else:
-                    # Send to the DetokenizerManager (single worker)
-                    logger.info(f"🔍 Single detokenizer worker mode")
-                    self.send_to_detokenizer = get_zmq_socket(
-                        context, zmq.PUSH, port_args.detokenizer_ipc_name, False
-                    )
-                    self.use_detokenizer_load_balancer = False
+                # Send to the DetokenizerManager (single worker)
+                logger.info(f"🔍 Single detokenizer worker mode")
+                self.send_to_detokenizer = get_zmq_socket(
+                    context, zmq.PUSH, port_args.detokenizer_ipc_name, False
+                )
+                self.use_detokenizer_load_balancer = False
 
         if self.pp_rank == 0 and self.attn_tp_rank == 0:
             if self.server_args.sleep_on_idle:
@@ -3053,23 +3039,16 @@ def run_scheduler_process(
             detokenizer_port_args_list is not None
             and len(detokenizer_port_args_list) > 1
         ):
-            if getattr(server_args, "use_combined_workers", False):
-                logger.info(
-                    f"🔍 Combined workers mode - no load balancer needed (direct communication)"
-                )
-                # For combined workers, we don't need to initialize the load balancer
-                # The scheduler will communicate directly with workers
-            else:
-                logger.info(f"🔍 Load balancer initialization condition met!")
-                logger.info(
-                    f"🔍 detokenizer_port_args_list is not None: {detokenizer_port_args_list is not None}"
-                )
-                logger.info(
-                    f"🔍 len(detokenizer_port_args_list) > 1: {len(detokenizer_port_args_list) > 1}"
-                )
-                logger.info(f"🔍 About to call init_detokenizer_load_balancer...")
-                scheduler.init_detokenizer_load_balancer(detokenizer_port_args_list)
-                logger.info(f"🔍 init_detokenizer_load_balancer call completed")
+            logger.info(f"🔍 Load balancer initialization condition met!")
+            logger.info(
+                f"🔍 detokenizer_port_args_list is not None: {detokenizer_port_args_list is not None}"
+            )
+            logger.info(
+                f"🔍 len(detokenizer_port_args_list) > 1: {len(detokenizer_port_args_list) > 1}"
+            )
+            logger.info(f"🔍 About to call init_detokenizer_load_balancer...")
+            scheduler.init_detokenizer_load_balancer(detokenizer_port_args_list)
+            logger.info(f"🔍 init_detokenizer_load_balancer call completed")
         else:
             logger.warning(f"⚠️ Load balancer initialization condition NOT met!")
             logger.warning(
@@ -3084,18 +3063,13 @@ def run_scheduler_process(
 
             # Ensure send_to_detokenizer is properly set for single worker mode
             if scheduler.send_to_detokenizer is None:
-                if getattr(server_args, "use_combined_workers", False):
-                    logger.info(
-                        "🔍 Combined workers mode - send_to_detokenizer intentionally None (workers communicate directly)"
-                    )
-                else:
-                    logger.warning(
-                        "⚠️ send_to_detokenizer is None, creating fallback socket"
-                    )
-                    context = zmq.Context(2)
-                    scheduler.send_to_detokenizer = get_zmq_socket(
-                        context, zmq.PUSH, port_args.detokenizer_ipc_name, False
-                    )
+                logger.warning(
+                    "⚠️ send_to_detokenizer is None, creating fallback socket"
+                )
+                context = zmq.Context(2)
+                scheduler.send_to_detokenizer = get_zmq_socket(
+                    context, zmq.PUSH, port_args.detokenizer_ipc_name, False
+                )
 
         pipe_writer.send(
             {
