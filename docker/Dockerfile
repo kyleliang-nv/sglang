@@ -90,7 +90,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
 # Build and install NVSHMEM
 RUN cd /sgl-workspace/nvshmem && \
     if [ "$BUILD_TYPE" = "blackwell" ]; then \
-        export CUDA_ARCH=100; \
+        export CUDA_ARCH=90;100; \
     else \
         export CUDA_ARCH=90; \
     fi; \
