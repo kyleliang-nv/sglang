@@ -305,13 +305,13 @@ class Scheduler(
                     f"🔍 num_detokenizer_workers value: {server_args.num_detokenizer_workers}"
                 )
 
-            # Check if we should use load balancer (multiple workers OR PD-disagg mode)
+            # Check if we should use load balancer (multiple workers OR decode mode, but NOT prefill mode)
             should_use_load_balancer = (
                 hasattr(server_args, "num_detokenizer_workers")
                 and server_args.num_detokenizer_workers > 1
             ) or (
                 hasattr(server_args, "disaggregation_mode")
-                and server_args.disaggregation_mode in ["prefill", "decode"]
+                and server_args.disaggregation_mode == "decode"
             )
 
             if should_use_load_balancer:
