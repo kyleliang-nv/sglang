@@ -705,7 +705,16 @@ def _launch_subprocesses(
     )
 
     # Initialize detokenizer port args list for multiple workers
-    detoken_port_args_list = [port_args]  # Default to single worker
+    # For combined workers, we need to replace the default port args with worker-compatible ones
+    if (
+        getattr(server_args, "use_combined_workers", False)
+        and hasattr(server_args, "disaggregation_mode")
+        and server_args.disaggregation_mode == "decode"
+    ):
+        # For combined workers, start with an empty list and add worker-compatible ports
+        detoken_port_args_list = []
+    else:
+        detoken_port_args_list = [port_args]  # Default to single worker
 
     # Create additional port args for multiple workers BEFORE launching schedulers
     # For PD-disagg servers, create the list only if NOT using combined workers
@@ -822,9 +831,10 @@ def _launch_subprocesses(
                     f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
                 )
 
-                # For decode servers with combined workers, still create port args for load balancer compatibility
-                # The scheduler expects these even though workers communicate directly
-                for i in range(1, 2):  # Create 1 additional entry (total of 2)
+                # For decode servers with combined workers, create port args for the load balancer
+                # The load balancer will handle distribution to workers
+                # We only need enough port args to satisfy the load balancer initialization condition
+                for i in range(2):  # Create 2 entries to satisfy len() > 1 condition
                     worker_port = 6000 + i
                     host = (
                         port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
@@ -844,7 +854,7 @@ def _launch_subprocesses(
                     detoken_port_args_list.append(worker_port_args)
 
                     logger.info(
-                        f"🔌 Created combined worker port arg {i+1}: {worker_port_args.detokenizer_ipc_name}"
+                        f"🔌 Created load balancer port arg {i}: {worker_port_args.detokenizer_ipc_name}"
                     )
 
                 logger.info(
