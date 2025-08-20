@@ -722,78 +722,82 @@ def _launch_subprocesses(
             and getattr(server_args, "use_combined_workers", True)
         )
 
-        if server_args.num_detokenizer_workers > 1 and not use_combined_for_pd:
-            logger.info(
-                f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
-            )
-            logger.info(
-                f"🔍 server_args.num_detokenizer_workers: {server_args.num_detokenizer_workers}"
-            )
-
-            # Create additional port args for extra workers
-            for i in range(1, server_args.num_detokenizer_workers):
-                # Create new port args with TCP sockets for bidirectional communication
-                # Use a completely different port range to avoid conflicts with scheduler ports
-                # Start from port 6000 for detokenizer workers
-                worker_port = 6000 + i
-
-                # Get the host from the main port args or use localhost
-                host = (
-                    port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
-                    if ":" in port_args.detokenizer_ipc_name
-                    else "127.0.0.1"
+        # For PD-disagg servers, always create port args (either for workers or for load balancer)
+        if hasattr(
+            server_args, "disaggregation_mode"
+        ) and server_args.disaggregation_mode in ["prefill", "decode"]:
+            if server_args.num_detokenizer_workers > 1 and not use_combined_for_pd:
+                logger.info(
+                    f"🚀 Preparing {server_args.num_detokenizer_workers} detokenizer worker port configurations..."
+                )
+                logger.info(
+                    f"🔍 server_args.num_detokenizer_workers: {server_args.num_detokenizer_workers}"
                 )
 
-                worker_port_args = PortArgs(
-                    tokenizer_ipc_name=port_args.tokenizer_ipc_name,  # Same tokenizer
-                    scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,  # Same scheduler
-                    detokenizer_ipc_name=f"tcp://{host}:{worker_port}",  # Use TCP for bidirectional communication
-                    tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,  # Same tokenizer manager
-                    nccl_port=port_args.nccl_port,
-                    rpc_ipc_name=port_args.rpc_ipc_name,
-                    metrics_ipc_name=port_args.metrics_ipc_name,
-                )
-                detoken_port_args_list.append(worker_port_args)
+                # Create additional port args for extra workers
+                for i in range(1, server_args.num_detokenizer_workers):
+                    # Create new port args with TCP sockets for bidirectional communication
+                    # Use a completely different port range to avoid conflicts with scheduler ports
+                    # Start from port 6000 for detokenizer workers
+                    worker_port = 6000 + i
+
+                    # Get the host from the main port args or use localhost
+                    host = (
+                        port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
+                        if ":" in port_args.detokenizer_ipc_name
+                        else "127.0.0.1"
+                    )
+
+                    worker_port_args = PortArgs(
+                        tokenizer_ipc_name=port_args.tokenizer_ipc_name,  # Same tokenizer
+                        scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,  # Same scheduler
+                        detokenizer_ipc_name=f"tcp://{host}:{worker_port}",  # Use TCP for bidirectional communication
+                        tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,  # Same tokenizer manager
+                        nccl_port=port_args.nccl_port,
+                        rpc_ipc_name=port_args.rpc_ipc_name,
+                        metrics_ipc_name=port_args.metrics_ipc_name,
+                    )
+                    detoken_port_args_list.append(worker_port_args)
+
+                    logger.info(
+                        f"🔌 Prepared detokenizer worker {i+1} TCP: {worker_port_args.detokenizer_ipc_name}"
+                    )
 
                 logger.info(
-                    f"🔌 Prepared detokenizer worker {i+1} TCP: {worker_port_args.detokenizer_ipc_name}"
+                    f"🔍 Final detoken_port_args_list length: {len(detoken_port_args_list)}"
                 )
-
-            logger.info(
-                f"🔍 Final detoken_port_args_list length: {len(detoken_port_args_list)}"
-            )
-        elif not use_combined_for_pd:
-            logger.info(
-                f"🔍 PD-disagg server detected - creating port args list for schedulers (no workers needed)"
-            )
-            logger.info(
-                f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
-            )
-
-            # For PD-disagg servers, create at least 2 port args to satisfy load balancer condition
-            # This ensures schedulers can initialize their load balancers properly
-            for i in range(1, 2):  # Create 1 additional entry (total of 2)
-                worker_port = 6000 + i
-                host = (
-                    port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
-                    if ":" in port_args.detokenizer_ipc_name
-                    else "127.0.0.1"
-                )
-
-                worker_port_args = PortArgs(
-                    tokenizer_ipc_name=port_args.tokenizer_ipc_name,
-                    scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,
-                    detokenizer_ipc_name=f"tcp://{host}:{worker_port}",
-                    tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,
-                    nccl_port=port_args.nccl_port,
-                    rpc_ipc_name=port_args.rpc_ipc_name,
-                    metrics_ipc_name=port_args.metrics_ipc_name,
-                )
-                detoken_port_args_list.append(worker_port_args)
-
+            elif not use_combined_for_pd:
                 logger.info(
-                    f"🔌 Created PD-disagg port arg {i+1}: {worker_port_args.detokenizer_ipc_name}"
+                    f"🔍 PD-disagg server detected - creating port args list for schedulers (no workers needed)"
                 )
+                logger.info(
+                    f"🔍 server_args.disaggregation_mode: {server_args.disaggregation_mode}"
+                )
+
+                # For PD-disagg servers, create at least 2 port args to satisfy load balancer condition
+                # This ensures schedulers can initialize their load balancers properly
+                for i in range(1, 2):  # Create 1 additional entry (total of 2)
+                    worker_port = 6000 + i
+                    host = (
+                        port_args.detokenizer_ipc_name.split(":")[1].replace("//", "")
+                        if ":" in port_args.detokenizer_ipc_name
+                        else "127.0.0.1"
+                    )
+
+                    worker_port_args = PortArgs(
+                        tokenizer_ipc_name=port_args.tokenizer_ipc_name,
+                        scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,
+                        detokenizer_ipc_name=f"tcp://{host}:{worker_port}",
+                        tokenizer_manager_ipc_name=port_args.tokenizer_manager_ipc_name,
+                        nccl_port=port_args.nccl_port,
+                        rpc_ipc_name=port_args.rpc_ipc_name,
+                        metrics_ipc_name=port_args.metrics_ipc_name,
+                    )
+                    detoken_port_args_list.append(worker_port_args)
+
+                    logger.info(
+                        f"🔌 Created PD-disagg port arg {i+1}: {worker_port_args.detokenizer_ipc_name}"
+                    )
         else:
             logger.info(
                 f"🔍 PD-disagg server with combined workers - no port args needed (direct communication)"

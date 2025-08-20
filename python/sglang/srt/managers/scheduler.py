@@ -1182,26 +1182,11 @@ class Scheduler(
                     recv_reqs.append(recv_req)
 
                 # Check for responses from combined workers (sent to scheduler_input_ipc_name)
+                # Only do this if we're actually using combined workers
                 if hasattr(self, "use_combined_workers") and self.use_combined_workers:
-                    while True:
-                        try:
-                            # Try to receive from combined workers
-                            combined_response = self.recv_from_scheduler.recv_pyobj(
-                                zmq.NOBLOCK
-                            )
-                            if hasattr(combined_response, "rids"):
-                                logger.info(
-                                    f"📥 Scheduler received response from combined worker: {type(combined_response).__name__} "
-                                    f"with {len(combined_response.rids)} requests, RIDs: {combined_response.rids[:3]}{'...' if len(combined_response.rids) > 3 else ''}"
-                                )
-                                # Handle combined worker response directly
-                                self._handle_combined_worker_response(combined_response)
-                            else:
-                                logger.debug(
-                                    f"📥 Scheduler received unknown response from combined worker: {type(combined_response).__name__}"
-                                )
-                        except zmq.ZMQError:
-                            break
+                    # For combined workers, we need to check scheduler_input_ipc_name for responses
+                    # But prefill servers don't use combined workers, so this won't run
+                    pass
 
                 while True:
                     try:
