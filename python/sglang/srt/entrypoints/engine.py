@@ -910,12 +910,12 @@ def _launch_subprocesses(
                     None,
                 )
 
-                # If we have multiple detokenizer workers OR PD-disagg mode (but not combined workers), add the port args list
+                # If we have multiple detokenizer workers OR decode mode (prefill doesn't need detokenization), add the port args list
                 if (
                     server_args.num_detokenizer_workers > 1
                     or (
                         hasattr(server_args, "disaggregation_mode")
-                        and server_args.disaggregation_mode in ["prefill", "decode"]
+                        and server_args.disaggregation_mode == "decode"
                     )
                 ) and len(detoken_port_args_list) > 0:
                     logger.info(
@@ -950,13 +950,13 @@ def _launch_subprocesses(
         reader, writer = mp.Pipe(duplex=False)
         scheduler_pipe_readers = [reader]
 
-        # Pass detokenizer port args if multiple workers are configured OR PD-disagg mode (but not combined workers)
+        # Pass detokenizer port args if multiple workers are configured OR decode mode (prefill doesn't need detokenization)
         controller_args = (server_args, port_args, writer)
         if (
             server_args.num_detokenizer_workers > 1
             or (
                 hasattr(server_args, "disaggregation_mode")
-                and server_args.disaggregation_mode in ["prefill", "decode"]
+                and server_args.disaggregation_mode == "decode"
             )
         ) and len(detoken_port_args_list) > 0:
             logger.info(f"🔍 Adding detokenizer port args to data parallel controller")
