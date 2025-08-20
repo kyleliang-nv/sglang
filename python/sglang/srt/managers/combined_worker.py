@@ -66,12 +66,19 @@ class CombinedWorker:
 
         # Init inter-process communication
         context = zmq.Context(2)
+        # Combined worker connects to scheduler (PULL socket)
         self.recv_from_scheduler = get_zmq_socket(
-            context, zmq.PULL, port_args.detokenizer_ipc_name, True
+            context,
+            zmq.PULL,
+            port_args.detokenizer_ipc_name,
+            False,  # connect=False for TCP
         )
-        # Combined worker sends responses back to scheduler for direct client communication
+        # Combined worker connects to scheduler for responses (PUSH socket)
         self.send_to_scheduler = get_zmq_socket(
-            context, zmq.PUSH, port_args.scheduler_input_ipc_name, False
+            context,
+            zmq.PUSH,
+            port_args.scheduler_input_ipc_name,
+            False,  # connect=False for TCP
         )
 
         # Initialize tokenizer for detokenization
