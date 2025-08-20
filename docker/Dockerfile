@@ -90,14 +90,14 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
 # Build and install NVSHMEM
 RUN cd /sgl-workspace/nvshmem && \
     if [ "$BUILD_TYPE" = "blackwell" ]; then CUDA_ARCH=100; else CUDA_ARCH=90; fi \
-    NVSHMEM_SHMEM_SUPPORT=0 \
-    NVSHMEM_UCX_SUPPORT=0 \
-    NVSHMEM_USE_NCCL=0 \
-    NVSHMEM_MPI_SUPPORT=0 \
-    NVSHMEM_IBGDA_SUPPORT=1 \
-    NVSHMEM_PMIX_SUPPORT=0 \
-    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-    NVSHMEM_USE_GDRCOPY=1 \
+    export NVSHMEM_SHMEM_SUPPORT=0 && \
+    export NVSHMEM_UCX_SUPPORT=0 && \
+    export NVSHMEM_USE_NCCL=0 && \
+    export NVSHMEM_MPI_SUPPORT=0 && \
+    export NVSHMEM_IBGDA_SUPPORT=1 && \
+    export NVSHMEM_PMIX_SUPPORT=0 && \
+    export NVSHMEM_TIMEOUT_DEVICE_POLLING=0 && \
+    export NVSHMEM_USE_GDRCOPY=1 && \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} && \
     cmake --build build --target install -j${CMAKE_BUILD_PARALLEL_LEVEL}
 
