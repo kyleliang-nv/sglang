@@ -979,14 +979,14 @@ def _launch_subprocesses(
                 f"🚀 Launching {server_args.num_detokenizer_workers} combined workers..."
             )
 
-            # Launch additional combined workers using the pre-configured port args
+            # Launch additional combined workers using the main port args (direct communication)
             for i in range(1, server_args.num_detokenizer_workers):
                 # Launch additional combined worker
                 worker_proc = mp.Process(
                     target=run_combined_worker_process,
                     args=(
                         server_args,
-                        detoken_port_args_list[i],  # Use pre-configured port args
+                        port_args,  # Use main port args for all combined workers
                         i + 1,  # Worker ID (1, 2, 3, etc.)
                     ),
                 )
@@ -994,7 +994,7 @@ def _launch_subprocesses(
                 detoken_procs.append(worker_proc)
 
                 logger.info(
-                    f"🔌 Launched combined worker {i+1} (ID: {i+1}) with IPC: {detoken_port_args_list[i].detokenizer_ipc_name}"
+                    f"🔌 Launched combined worker {i+1} (ID: {i+1}) with IPC: {port_args.detokenizer_ipc_name}"
                 )
         else:
             logger.info("🔌 Using single combined worker")
@@ -1031,11 +1031,19 @@ def _launch_subprocesses(
             # Launch additional detokenizer workers using the pre-configured port args
             for i in range(1, server_args.num_detokenizer_workers):
                 # Launch additional detokenizer worker
+                if i < len(detoken_port_args_list):
+                    worker_port_args = detoken_port_args_list[i]
+                else:
+                    logger.warning(
+                        f"⚠️ Not enough port args for worker {i+1}, using main port args"
+                    )
+                    worker_port_args = port_args
+
                 worker_proc = mp.Process(
                     target=run_detokenizer_process,
                     args=(
                         server_args,
-                        detoken_port_args_list[i],  # Use pre-configured port args
+                        worker_port_args,  # Use available port args
                         i + 1,  # Worker ID (1, 2, 3, etc.)
                     ),
                 )
@@ -1043,7 +1051,7 @@ def _launch_subprocesses(
                 detoken_procs.append(worker_proc)
 
                 logger.info(
-                    f"🔌 Launched detokenizer worker {i+1} (ID: {i+1}) with IPC: {detoken_port_args_list[i].detokenizer_ipc_name}"
+                    f"🔌 Launched detokenizer worker {i+1} (ID: {i+1}) with IPC: {worker_port_args.detokenizer_ipc_name}"
                 )
         else:
             logger.info("🔌 Using single detokenizer worker")

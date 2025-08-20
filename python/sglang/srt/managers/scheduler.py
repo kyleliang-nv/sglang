@@ -243,6 +243,11 @@ class Scheduler(
         )
         self.enable_kv_cache_events = server_args.kv_events_config is not None
         self.stream_interval = server_args.stream_interval
+
+        # Check if we're using combined workers
+        self.use_combined_workers = getattr(server_args, "use_combined_workers", False)
+        if self.use_combined_workers:
+            logger.info("🔀 Scheduler configured for combined workers mode")
         self.spec_algorithm = SpeculativeAlgorithm.from_string(
             server_args.speculative_algorithm
         )
@@ -1175,6 +1180,28 @@ class Scheduler(
                         )
 
                     recv_reqs.append(recv_req)
+
+                # Check for responses from combined workers (sent to scheduler_input_ipc_name)
+                if hasattr(self, "use_combined_workers") and self.use_combined_workers:
+                    while True:
+                        try:
+                            # Try to receive from combined workers
+                            combined_response = self.recv_from_scheduler.recv_pyobj(
+                                zmq.NOBLOCK
+                            )
+                            if hasattr(combined_response, "rids"):
+                                logger.info(
+                                    f"📥 Scheduler received response from combined worker: {type(combined_response).__name__} "
+                                    f"with {len(combined_response.rids)} requests, RIDs: {combined_response.rids[:3]}{'...' if len(combined_response.rids) > 3 else ''}"
+                                )
+                                # Handle combined worker response directly
+                                self._handle_combined_worker_response(combined_response)
+                            else:
+                                logger.debug(
+                                    f"📥 Scheduler received unknown response from combined worker: {type(combined_response).__name__}"
+                                )
+                        except zmq.ZMQError:
+                            break
 
                 while True:
                     try:
@@ -2839,6 +2866,76 @@ class Scheduler(
             logger.warning(
                 f"   - detokenizer_port_args_list: {detokenizer_port_args_list}"
             )
+
+    def _handle_combined_worker_response(self, response):
+        """Handle responses from combined workers (BatchStrOut, BatchMultimodalOut, etc.)."""
+        try:
+            if hasattr(response, "rids") and hasattr(response, "output_strs"):
+                # This is a BatchStrOut from combined worker
+                logger.info(
+                    f"📝 Scheduler handling BatchStrOut from combined worker: {len(response.rids)} requests"
+                )
+
+                # Process each request response
+                for i, rid in enumerate(response.rids):
+                    if rid in self.requests:
+                        req = self.requests[rid]
+
+                        # Update request with output from combined worker
+                        if hasattr(response, "output_strs") and i < len(
+                            response.output_strs
+                        ):
+                            output_str = response.output_strs[i]
+                            req.output_str = output_str
+
+                        # Handle finished reason
+                        if hasattr(response, "finished_reasons") and i < len(
+                            response.finished_reasons
+                        ):
+                            finished_reason = response.finished_reasons[i]
+                            req.finished_reason = finished_reason
+
+                        # Mark request as finished if needed
+                        if req.finished_reason and req.finished_reason.get(
+                            "finished", False
+                        ):
+                            req.finished = True
+
+                        # Stream output to client if streaming is enabled
+                        if req.stream:
+                            self._stream_output_to_client(req, response, i)
+                        else:
+                            # For non-streaming requests, collect the final response
+                            self._collect_final_response(req, response, i)
+
+                        logger.info(
+                            f"📝 Scheduler processed combined worker response for request {rid}"
+                        )
+                    else:
+                        logger.warning(
+                            f"⚠️ Scheduler received response for unknown request {rid}"
+                        )
+            else:
+                logger.warning(
+                    f"⚠️ Scheduler received unknown response type from combined worker: {type(response)}"
+                )
+        except Exception as e:
+            logger.error(f"❌ Error handling combined worker response: {e}")
+            import traceback
+
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+    def _stream_output_to_client(self, req, response, index):
+        """Stream output from combined worker to client."""
+        # This would implement the streaming logic
+        # For now, just log that we're streaming
+        logger.info(f"📤 Scheduler streaming output for request {req.rid}")
+
+    def _collect_final_response(self, req, response, index):
+        """Collect final response from combined worker."""
+        # This would implement the final response collection logic
+        # For now, just log that we're collecting
+        logger.info(f"📤 Scheduler collecting final response for request {req.rid}")
 
 
 class IdleSleeper:
