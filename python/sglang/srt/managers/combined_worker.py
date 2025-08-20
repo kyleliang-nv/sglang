@@ -69,8 +69,9 @@ class CombinedWorker:
         self.recv_from_scheduler = get_zmq_socket(
             context, zmq.PULL, port_args.detokenizer_ipc_name, True
         )
-        self.send_to_tokenizer_manager = get_zmq_socket(
-            context, zmq.PUSH, port_args.tokenizer_manager_ipc_name, False
+        # Combined worker sends directly to scheduler (bypassing TokenizerManager)
+        self.send_to_scheduler = get_zmq_socket(
+            context, zmq.PUSH, port_args.scheduler_input_ipc_name, False
         )
 
         # Initialize tokenizer for detokenization
@@ -139,9 +140,9 @@ class CombinedWorker:
             output = self._process_request(recv_obj)
             process_time = time.time() - process_start
 
-            # Send result to tokenizer manager for final processing
+            # Send result directly to scheduler (bypassing TokenizerManager)
             send_start = time.time()
-            self.send_to_tokenizer_manager.send_pyobj(output)
+            self.send_to_scheduler.send_pyobj(output)
             send_time = time.time() - send_start
 
             # Log performance if enabled
@@ -158,7 +159,7 @@ class CombinedWorker:
             self._update_performance_stats(recv_obj, process_time)
 
     def _process_request(self, recv_obj):
-        """Process request with zero IPC overhead - direct function calls."""
+        """Process request with zero IPC overhead - sends directly to scheduler."""
         if isinstance(recv_obj, BatchTokenIDOut):
             return self._handle_batch_token_id_out(recv_obj)
         elif isinstance(recv_obj, BatchEmbeddingOut):
