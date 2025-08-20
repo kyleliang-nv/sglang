@@ -1001,22 +1001,25 @@ def _launch_subprocesses(
         return None, None, None
 
     # Launch detokenizer process based on configuration
-    # Use original method for prefill servers, new combined method for decode servers
+    # Prefill servers don't need detokenization at all
     if (
         hasattr(server_args, "disaggregation_mode")
         and server_args.disaggregation_mode == "prefill"
     ):
         logger.info(
-            "🚀 Prefill server detected - using standard detokenizer workers (original method)"
+            "🚀 Prefill server detected - skipping detokenizer workers (not needed)"
         )
-        use_combined = False
+        # Prefill servers don't need detokenization - they only process prompts and send token IDs
+        detoken_procs = []
+        use_combined = False  # Ensure variable is defined for prefill servers
     else:
+        # For decode servers, determine if we should use combined workers
         use_combined = getattr(server_args, "use_combined_workers", True)
 
-    if use_combined:
-        logger.info(
-            "🚀 Using combined workers (detokenizer + tokenizer manager in single process)"
-        )
+        if use_combined:
+            logger.info(
+                "🚀 Using combined workers (detokenizer + tokenizer manager in single process)"
+            )
 
         # Launch main combined worker process (worker 0)
         # Create unique port args for main worker
@@ -1106,10 +1109,10 @@ def _launch_subprocesses(
             logger.info("🚀 Waiting for combined workers to initialize connections...")
             time.sleep(2)  # Brief delay for ZMQ socket initialization
             logger.info("🚀 Combined workers initialization complete")
-    else:
-        logger.info(
-            "🚀 Using standard detokenizer workers (separate or combined disabled)"
-        )
+        else:
+            logger.info(
+                "🚀 Using standard detokenizer workers (separate or combined disabled)"
+            )
 
         # Launch detokenizer process
         detoken_proc = mp.Process(
