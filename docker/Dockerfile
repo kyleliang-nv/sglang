@@ -93,7 +93,7 @@ RUN cd /sgl-workspace/nvshmem && \
         export CUDA_ARCH=100; \
     else \
         export CUDA_ARCH=90; \
-    fi \
+    fi; \
     export NVSHMEM_SHMEM_SUPPORT=0 && \
     export NVSHMEM_UCX_SUPPORT=0 && \
     export NVSHMEM_USE_NCCL=0 && \
