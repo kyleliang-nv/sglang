@@ -808,9 +808,12 @@ def _launch_subprocesses(
 
             # Create unique port arguments for each worker to avoid port conflicts
             worker_port_args = PortArgs.init_new(server_args, dp_rank=i)
+            logger.info(f"DetokenizerManager worker {i} using ports:")
             logger.info(
-                f"DetokenizerManager worker {i} using ports: {worker_port_args}"
+                f"  - detokenizer_ipc_name: {worker_port_args.detokenizer_ipc_name}"
             )
+            logger.info(f"  - rpc_ipc_name: {worker_port_args.rpc_ipc_name}")
+            logger.info(f"  - metrics_ipc_name: {worker_port_args.metrics_ipc_name}")
 
             proc = mp.Process(
                 target=run_detokenizer_process,

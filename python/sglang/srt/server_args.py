@@ -2351,9 +2351,12 @@ class PortArgs:
 
             if enable_hybrid and dp_rank is not None:
                 # For hybrid mode, create unique ports for each worker
-                detokenizer_port = port_base + 1 + dp_rank  # Unique port per worker
-                rpc_port = port_base + 2 + dp_rank  # Unique port per worker
-                metrics_port = port_base + 3 + dp_rank  # Unique port per worker
+                # Use a completely separate port range to avoid conflicts with data parallel ports
+                # Offset by 1000 to be safe for any dp-size value
+                hybrid_port_base = port_base + 1000  # Offset by 1000 to avoid conflicts
+                detokenizer_port = hybrid_port_base + dp_rank  # Unique port per worker
+                rpc_port = hybrid_port_base + 10 + dp_rank  # Unique port per worker
+                metrics_port = hybrid_port_base + 20 + dp_rank  # Unique port per worker
                 scheduler_input_port = port_base + 4 + 1 + dp_rank
             else:
                 # Standard mode: use fixed ports
