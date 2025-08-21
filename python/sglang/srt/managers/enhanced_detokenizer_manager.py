@@ -20,10 +20,10 @@ import uuid
 from typing import Any, Dict, List, Optional, Union
 
 from sglang.srt.managers.detokenizer_manager import DetokenizerManager
-from sglang.srt.managers.port_args import PortArgs
 from sglang.srt.managers.scheduler_output_processor_mixin import (
     SchedulerOutputProcessorMixin,
 )
+from sglang.srt.managers.server_args import PortArgs
 from sglang.srt.managers.shared_memory_manager import SharedMemoryManager
 from sglang.srt.server_args import ServerArgs
 

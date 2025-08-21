@@ -26,8 +26,8 @@ from sglang.srt.entrypoints.enhanced_http_server import EnhancedHTTPServer
 from sglang.srt.managers.enhanced_detokenizer_manager import EnhancedDetokenizerManager
 from sglang.srt.managers.enhanced_tokenizer_manager import EnhancedTokenizerManager
 from sglang.srt.managers.hybrid_coordinator import HybridCoordinator
-from sglang.srt.managers.port_args import PortArgs
 from sglang.srt.managers.scheduler import Scheduler
+from sglang.srt.managers.server_args import PortArgs
 from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)

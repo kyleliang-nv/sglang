@@ -21,7 +21,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
-from sglang.srt.managers.port_args import PortArgs
+from sglang.srt.managers.server_args import PortArgs
 from sglang.srt.managers.shared_memory_manager import SharedMemoryManager
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.server_args import ServerArgs
@@ -60,7 +60,9 @@ class EnhancedTokenizerManager(TokenizerManager):
         """Enhanced response waiting with shared memory coordination."""
         if not self.enable_hybrid_mode or not self.shared_memory_manager:
             # Fall back to original implementation
-            return await super()._wait_one_response(obj, state, request)
+            async for response in super()._wait_one_response(obj, state, request):
+                yield response
+            return
 
         try:
             request_id = state.rid
