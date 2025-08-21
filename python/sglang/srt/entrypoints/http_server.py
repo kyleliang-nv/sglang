@@ -1128,6 +1128,32 @@ def launch_server_standard_disaggregated(
     signal.signal(signal.SIGINT, cleanup_handler)
     signal.signal(signal.SIGTERM, cleanup_handler)
 
+    # Execute warmup for separated process mode
+    if not server_args.skip_server_warmup:
+        logger.info("Executing warmup for separated process mode...")
+        try:
+            # Wait a bit for processes to be fully ready
+            import time
+
+            time.sleep(2)
+
+            # Execute warmup
+            warmup_success = _execute_server_warmup(server_args, pipe_finish_writer)
+            if warmup_success:
+                logger.info(
+                    "✅ Warmup completed successfully for separated process mode"
+                )
+                logger.info("The server is fired up and ready to roll!")
+            else:
+                logger.error("❌ Warmup failed for separated process mode")
+                raise RuntimeError("Warmup failed")
+        except Exception as e:
+            logger.error(f"Warmup error: {e}")
+            cleanup_handler(signal.SIGINT, None)
+            raise
+    else:
+        logger.info("Skipping server warmup as requested")
+
     # Log final status
     logger.info(
         f"Separated process server launched successfully in {disaggregation_mode} mode"
@@ -1369,6 +1395,32 @@ def launch_server_hybrid_disaggregated(
     for i, proc in enumerate(detokenizer_procs):
         logger.info(f"  DetokenizerManager process {i} (PID: {proc.pid})")
     logger.info(f"  HTTP Server (PID: {http_proc.pid})")
+
+    # Execute warmup for hybrid disaggregation mode
+    if not server_args.skip_server_warmup:
+        logger.info("Executing warmup for hybrid disaggregation mode...")
+        try:
+            # Wait a bit for all processes to be fully ready
+            import time
+
+            time.sleep(3)  # Give hybrid workers more time to initialize
+
+            # Execute warmup
+            warmup_success = _execute_server_warmup(server_args, pipe_finish_writer)
+            if warmup_success:
+                logger.info(
+                    "✅ Warmup completed successfully for hybrid disaggregation mode"
+                )
+                logger.info("The server is fired up and ready to roll!")
+            else:
+                logger.error("❌ Warmup failed for hybrid disaggregation mode")
+                raise RuntimeError("Warmup failed")
+        except Exception as e:
+            logger.error(f"Warmup error: {e}")
+            cleanup_handler(signal.SIGINT, None)
+            raise
+    else:
+        logger.info("Skipping server warmup as requested")
 
     # Wait for processes to complete
     try:
