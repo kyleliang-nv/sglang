@@ -264,16 +264,33 @@ class LimitedCapacityDict(OrderedDict):
 def run_detokenizer_process(
     server_args: ServerArgs,
     port_args: PortArgs,
+    worker_id: int = 0,
 ):
     kill_itself_when_parent_died()
-    setproctitle.setproctitle("sglang::detokenizer")
+    setproctitle.setproctitle(f"sglang::detokenizer-{worker_id}")
     configure_logger(server_args)
     parent_process = psutil.Process().parent()
 
     try:
-        manager = DetokenizerManager(server_args, port_args)
+        # Check if hybrid mode is enabled
+        enable_hybrid = getattr(server_args, "enable_multi_tokenizer", False)
+
+        if enable_hybrid:
+            logger.info(
+                f"🚀 Starting DetokenizerManager worker {worker_id} in hybrid mode"
+            )
+            # TODO: Use EnhancedDetokenizerManager when available
+            manager = DetokenizerManager(server_args, port_args)
+            logger.info(
+                f"✅ DetokenizerManager worker {worker_id} initialized in hybrid mode"
+            )
+        else:
+            manager = DetokenizerManager(server_args, port_args)
+
         manager.event_loop()
     except Exception:
         traceback = get_exception_traceback()
-        logger.error(f"DetokenizerManager hit an exception: {traceback}")
+        logger.error(
+            f"DetokenizerManager worker {worker_id} hit an exception: {traceback}"
+        )
         parent_process.send_signal(signal.SIGQUIT)

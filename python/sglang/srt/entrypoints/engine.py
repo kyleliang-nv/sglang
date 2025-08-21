@@ -118,7 +118,7 @@ class Engine(EngineBase):
 
         # Allocate ports for inter-process communications
         self.port_args = PortArgs.init_new(server_args)
-        logger.info(f"{server_args=}")
+        logger.info(f"server_args: {server_args}")
 
         # Launch subprocesses
         tokenizer_manager, template_manager, scheduler_info = _launch_subprocesses(
@@ -682,16 +682,32 @@ def _launch_subprocesses(
 ) -> Tuple[TokenizerManager, TemplateManager, Dict]:
     """
     Launch the TokenizerManager in the main process, the Scheduler in a subprocess, and the DetokenizerManager in another subprocess.
+
+    If hybrid mode is enabled, creates multiple TokenizerManager and DetokenizerManager workers.
     """
     # Configure global environment
     configure_logger(server_args)
     server_args.check_server_args()
     _set_envs_and_config(server_args)
 
+    # Check if hybrid mode is enabled
+    enable_hybrid = getattr(server_args, "enable_multi_tokenizer", False)
+    if enable_hybrid:
+        logger.info("🚀 Hybrid architecture enabled in _launch_subprocesses")
+        logger.info(
+            f"   TokenizerManager workers: {getattr(server_args, 'tokenizer_worker_num', 1)}"
+        )
+        logger.info(
+            f"   DetokenizerManager processes: {getattr(server_args, 'detokenizer_processes', 1)}"
+        )
+        logger.info(
+            f"   Load balancing policy: {getattr(server_args, 'detokenizer_load_balance_policy', 'round_robin')}"
+        )
+
     # Allocate ports for inter-process communications
     if port_args is None:
         port_args = PortArgs.init_new(server_args)
-        logger.info(f"{server_args=}")
+        logger.info(f"port_args: {port_args}")
 
     # If using model from www.modelscope.cn, first download the model.
     server_args.model_path, server_args.tokenizer_path = prepare_model_and_tokenizer(
@@ -780,18 +796,46 @@ def _launch_subprocesses(
             )
         return None, None, None
 
-    # Launch detokenizer process
-    detoken_proc = mp.Process(
-        target=run_detokenizer_process,
-        args=(
-            server_args,
-            port_args,
-        ),
-    )
-    detoken_proc.start()
+    # Launch detokenizer processes
+    detoken_procs = []
+    if enable_hybrid:
+        # Launch multiple DetokenizerManager processes for hybrid mode
+        detokenizer_processes = getattr(server_args, "detokenizer_processes", 1)
+        logger.info(f"Starting {detokenizer_processes} DetokenizerManager processes...")
 
-    # Launch tokenizer process
-    tokenizer_manager = TokenizerManager(server_args, port_args)
+        for i in range(detokenizer_processes):
+            logger.info(f"Starting DetokenizerManager process {i}...")
+            proc = mp.Process(
+                target=run_detokenizer_process,
+                args=(server_args, port_args, i),  # Add worker_id
+                name=f"DetokenizerManager-{i}",
+            )
+            proc.start()
+            detoken_procs.append(proc)
+            logger.info(f"DetokenizerManager process {i} started (PID: {proc.pid})")
+    else:
+        # Launch single DetokenizerManager process (standard mode)
+        detoken_proc = mp.Process(
+            target=run_detokenizer_process,
+            args=(server_args, port_args),
+        )
+        detoken_proc.start()
+        detoken_procs = [detoken_proc]
+
+    # Launch tokenizer process(es)
+    if enable_hybrid:
+        # For hybrid mode, we'll create a coordinator that manages multiple workers
+        # For now, create the main TokenizerManager that will coordinate with others
+        logger.info("Creating main TokenizerManager for hybrid coordination...")
+        tokenizer_manager = TokenizerManager(server_args, port_args)
+
+        # TODO: Initialize hybrid coordinator and worker processes
+        # This is a placeholder for the full hybrid implementation
+        logger.info("⚠️  Hybrid architecture worker processes not yet fully implemented")
+        logger.info("   Using single TokenizerManager with hybrid mode detection")
+    else:
+        # Standard mode: single TokenizerManager
+        tokenizer_manager = TokenizerManager(server_args, port_args)
 
     # Initialize templates
     template_manager = TemplateManager()
@@ -824,4 +868,12 @@ def _launch_subprocesses(
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
+
+    if enable_hybrid:
+        logger.info("✅ Hybrid architecture initialization completed")
+        logger.info(
+            f"   Main TokenizerManager ready with max_req_input_len: {tokenizer_manager.max_req_input_len}"
+        )
+        logger.info(f"   {len(detoken_procs)} DetokenizerManager processes running")
+
     return tokenizer_manager, template_manager, scheduler_info

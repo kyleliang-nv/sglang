@@ -998,6 +998,38 @@ def launch_server_separated(
     Supports all disaggregation modes including PD-disaggregation.
     """
 
+    # Check if hybrid mode is enabled
+    if (
+        hasattr(server_args, "enable_multi_tokenizer")
+        and server_args.enable_multi_tokenizer
+    ):
+        logger.info("🚀 Hybrid architecture enabled for disaggregation mode")
+        logger.info(f"   TokenizerManager workers: {server_args.tokenizer_worker_num}")
+        logger.info(
+            f"   DetokenizerManager processes: {server_args.detokenizer_processes}"
+        )
+        logger.info(
+            f"   Load balancing policy: {server_args.detokenizer_load_balance_policy}"
+        )
+        return launch_server_hybrid_disaggregated(
+            server_args, pipe_finish_writer, launch_callback
+        )
+    else:
+        return launch_server_standard_disaggregated(
+            server_args, pipe_finish_writer, launch_callback
+        )
+
+
+def launch_server_standard_disaggregated(
+    server_args: ServerArgs,
+    pipe_finish_writer: Optional[multiprocessing.connection.Connection] = None,
+    launch_callback: Optional[Callable[[], None]] = None,
+):
+    """
+    Launch SRT Server with separated HTTP and TokenizerManager processes.
+    Supports all disaggregation modes including PD-disaggregation.
+    """
+
     # Import here to avoid circular imports
     from sglang.srt.disaggregation.utils import DisaggregationMode
     from sglang.srt.entrypoints.http_server_process import run_http_server_process
@@ -1107,6 +1139,240 @@ def launch_server_separated(
     # Wait for processes to complete
     try:
         for proc in processes:
+            proc.join()
+    except KeyboardInterrupt:
+        cleanup_handler(signal.SIGINT, None)
+
+
+def launch_server_hybrid_disaggregated(
+    server_args: ServerArgs,
+    pipe_finish_writer: Optional[multiprocessing.connection.Connection] = None,
+    launch_callback: Optional[Callable[[], None]] = None,
+):
+    """
+    Launch SRT Server with hybrid architecture in disaggregation mode.
+    Supports multiple TokenizerManager and DetokenizerManager workers.
+    """
+
+    # Import here to avoid circular imports
+    from sglang.srt.disaggregation.utils import DisaggregationMode
+    from sglang.srt.entrypoints.detokenizer_manager_process import (
+        run_detokenizer_process,
+    )
+    from sglang.srt.entrypoints.http_server_process import run_http_server_process
+    from sglang.srt.entrypoints.tokenizer_manager_process import (
+        run_tokenizer_manager_process,
+    )
+
+    # Check disaggregation mode
+    disaggregation_mode = DisaggregationMode(server_args.disaggregation_mode)
+    logger.info(f"🚀 Launching hybrid architecture in {disaggregation_mode} mode")
+
+    # Get worker counts
+    tokenizer_worker_num = getattr(server_args, "tokenizer_worker_num", 1)
+    detokenizer_processes = getattr(server_args, "detokenizer_processes", 1)
+
+    logger.info(f"Starting {tokenizer_worker_num} TokenizerManager workers")
+    logger.info(f"Starting {detokenizer_processes} DetokenizerManager processes")
+
+    # Find available ports for IPC
+    tokenizer_ports = []
+    detokenizer_ports = []
+    http_ipc_port = find_available_port(32000, 33000)
+
+    # Reserve ports for TokenizerManager workers
+    for i in range(tokenizer_worker_num):
+        port = find_available_port(31000, 32000)
+        tokenizer_ports.append(port)
+
+    # Reserve ports for DetokenizerManager processes
+    for i in range(detokenizer_processes):
+        port = find_available_port(33000, 34000)
+        detokenizer_ports.append(port)
+
+    logger.info(f"Using IPC ports:")
+    logger.info(f"  TokenizerManager workers: {tokenizer_ports}")
+    logger.info(f"  DetokenizerManager processes: {detokenizer_ports}")
+    logger.info(f"  HTTP Server: {http_ipc_port}")
+
+    # Create pipes for communication
+    tokenizer_readers = []
+    tokenizer_writers = []
+    detokenizer_readers = []
+    detokenizer_writers = []
+    http_reader, http_writer = multiprocessing.Pipe(duplex=False)
+
+    for i in range(tokenizer_worker_num):
+        reader, writer = multiprocessing.Pipe(duplex=False)
+        tokenizer_readers.append(reader)
+        tokenizer_writers.append(writer)
+
+    for i in range(detokenizer_processes):
+        reader, writer = multiprocessing.Pipe(duplex=False)
+        detokenizer_readers.append(reader)
+        detokenizer_writers.append(writer)
+
+    # Launch TokenizerManager worker processes
+    tokenizer_procs = []
+    logger.info("Starting TokenizerManager worker processes...")
+
+    for i in range(tokenizer_worker_num):
+        logger.info(f"Starting TokenizerManager worker {i}...")
+        proc = multiprocessing.Process(
+            target=run_tokenizer_manager_process,
+            args=(
+                server_args,
+                tokenizer_ports[i],
+                tokenizer_writers[i],
+                i,
+            ),  # Add worker_id
+            name=f"TokenizerManager-{i}",
+        )
+        proc.start()
+        tokenizer_procs.append(proc)
+        logger.info(f"TokenizerManager worker {i} started (PID: {proc.pid})")
+
+    # Launch DetokenizerManager processes
+    detokenizer_procs = []
+    logger.info("Starting DetokenizerManager processes...")
+
+    for i in range(detokenizer_processes):
+        logger.info(f"Starting DetokenizerManager process {i}...")
+        proc = multiprocessing.Process(
+            target=run_detokenizer_process,
+            args=(
+                server_args,
+                detokenizer_ports[i],
+                detokenizer_writers[i],
+                i,
+            ),  # Add worker_id
+            name=f"DetokenizerManager-{i}",
+        )
+        proc.start()
+        detokenizer_procs.append(proc)
+        logger.info(f"DetokenizerManager process {i} started (PID: {proc.pid})")
+
+    # Wait for all TokenizerManager workers to be ready
+    logger.info("Waiting for TokenizerManager workers to be ready...")
+    for i, (proc, reader) in enumerate(zip(tokenizer_procs, tokenizer_readers)):
+        try:
+            status = reader.recv()
+            if status.get("status") != "ready":
+                raise RuntimeError(
+                    f"TokenizerManager worker {i} failed to start: {status}"
+                )
+
+            actual_mode = status.get("mode", "unknown")
+            logger.info(f"TokenizerManager worker {i} ready in {actual_mode} mode")
+
+            # Verify mode consistency
+            if actual_mode != str(disaggregation_mode):
+                logger.warning(
+                    f"Mode mismatch for worker {i}: expected {disaggregation_mode}, got {actual_mode}"
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to start TokenizerManager worker {i}: {e}")
+            # Cleanup all processes
+            for p in tokenizer_procs + detokenizer_procs:
+                if p.is_alive():
+                    p.terminate()
+            raise
+
+    # Wait for all DetokenizerManager processes to be ready
+    logger.info("Waiting for DetokenizerManager processes to be ready...")
+    for i, (proc, reader) in enumerate(zip(detokenizer_procs, detokenizer_readers)):
+        try:
+            status = reader.recv()
+            if status.get("status") != "ready":
+                raise RuntimeError(
+                    f"DetokenizerManager process {i} failed to start: {status}"
+                )
+
+            actual_mode = status.get("mode", "unknown")
+            logger.info(f"DetokenizerManager process {i} ready in {actual_mode} mode")
+
+            # Verify mode consistency
+            if actual_mode != str(disaggregation_mode):
+                logger.warning(
+                    f"Mode mismatch for process {i}: expected {disaggregation_mode}, got {actual_mode}"
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to start DetokenizerManager process {i}: {e}")
+            # Cleanup all processes
+            for p in tokenizer_procs + detokenizer_procs:
+                if p.is_alive():
+                    p.terminate()
+            raise
+
+    # Launch HTTP server process
+    logger.info("Starting HTTP server process with hybrid architecture...")
+    http_proc = multiprocessing.Process(
+        target=run_http_server_process,
+        args=(
+            server_args,
+            f"localhost:{tokenizer_ports[0]}",
+            http_writer,
+        ),  # Use first TM port for now
+        name="HTTP-Server-Hybrid",
+    )
+    http_proc.start()
+
+    # Wait for HTTP server to be ready
+    try:
+        http_status = http_reader.recv()
+        if http_status.get("status") != "ready":
+            raise RuntimeError(f"HTTP server failed to start: {http_status}")
+
+        http_mode = http_status.get("mode", "unknown")
+        logger.info(
+            f"HTTP server process started successfully, connected to hybrid architecture in {http_mode} mode"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to start HTTP server: {e}")
+        http_proc.terminate()
+        # Cleanup all processes
+        for p in tokenizer_procs + detokenizer_procs:
+            if p.is_alive():
+                p.terminate()
+        raise
+
+    # Store process references for cleanup
+    all_processes = tokenizer_procs + detokenizer_procs + [http_proc]
+
+    # Set up signal handlers for cleanup
+    import signal
+
+    def cleanup_handler(signum, frame):
+        logger.info("Received signal, cleaning up hybrid architecture processes...")
+        for proc in all_processes:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+        if pipe_finish_writer:
+            pipe_finish_writer.send("cleanup_complete")
+
+    signal.signal(signal.SIGINT, cleanup_handler)
+    signal.signal(signal.SIGTERM, cleanup_handler)
+
+    # Log final status
+    logger.info(
+        f"✅ Hybrid architecture launched successfully in {disaggregation_mode} mode"
+    )
+    logger.info(f"Processes:")
+    for i, proc in enumerate(tokenizer_procs):
+        logger.info(f"  TokenizerManager worker {i} (PID: {proc.pid})")
+    for i, proc in enumerate(detokenizer_procs):
+        logger.info(f"  DetokenizerManager process {i} (PID: {proc.pid})")
+    logger.info(f"  HTTP Server (PID: {http_proc.pid})")
+
+    # Wait for processes to complete
+    try:
+        for proc in all_processes:
             proc.join()
     except KeyboardInterrupt:
         cleanup_handler(signal.SIGINT, None)
