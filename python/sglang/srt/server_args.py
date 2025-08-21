@@ -690,9 +690,9 @@ class ServerArgs:
         )
 
         # Set multi-process TokenizerManager flags
-        if self.tokenizer_worker_num > 1:
+        if hasattr(self, "tokenizer_worker_num") and self.tokenizer_worker_num > 1:
             self.enable_multi_tokenizer = True
-        if self.detokenizer_processes > 1:
+        if hasattr(self, "detokenizer_processes") and self.detokenizer_processes > 1:
             # Ensure we have at least one detokenizer process
             pass
 
@@ -2026,7 +2026,17 @@ class ServerArgs:
         args.dp_size = args.data_parallel_size
         args.ep_size = args.expert_parallel_size
         attrs = [attr.name for attr in dataclasses.fields(cls)]
-        return cls(**{attr: getattr(args, attr) for attr in attrs})
+
+        # Create kwargs dict with safe attribute access
+        kwargs = {}
+        for attr in attrs:
+            if hasattr(args, attr):
+                kwargs[attr] = getattr(args, attr)
+            else:
+                # Use default value from the dataclass field
+                logger.debug(f"Attribute {attr} not found in args, using default value")
+
+        return cls(**kwargs)
 
     def url(self):
         if is_valid_ipv6_address(self.host):
