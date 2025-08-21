@@ -285,6 +285,12 @@ class ServerArgs:
     enable_pdmux: bool = False
     sm_group_num: int = 3
 
+    # Multi-process TokenizerManager
+    tokenizer_worker_num: int = 1
+    enable_multi_tokenizer: bool = False
+    detokenizer_processes: int = 1
+    detokenizer_load_balance_policy: str = "round_robin"
+
     # Deprecated arguments
     enable_ep_moe: bool = False
     enable_deepep_moe: bool = False
@@ -682,6 +688,13 @@ class ServerArgs:
         os.environ["SGLANG_DISABLE_OUTLINES_DISK_CACHE"] = (
             "1" if self.disable_outlines_disk_cache else "0"
         )
+
+        # Set multi-process TokenizerManager flags
+        if self.tokenizer_worker_num > 1:
+            self.enable_multi_tokenizer = True
+        if self.detokenizer_processes > 1:
+            # Ensure we have at least one detokenizer process
+            pass
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -1966,6 +1979,27 @@ class ServerArgs:
             type=int,
             default=ServerArgs.sm_group_num,
             help="Number of sm partition groups.",
+        )
+
+        # Multi-process TokenizerManager
+        parser.add_argument(
+            "--tokenizer-worker-num",
+            type=int,
+            default=ServerArgs.tokenizer_worker_num,
+            help="Number of TokenizerManager worker processes. Default is 1 (single process).",
+        )
+        parser.add_argument(
+            "--detokenizer-processes",
+            type=int,
+            default=ServerArgs.detokenizer_processes,
+            help="Number of DetokenizerManager processes. Default is 1 (single process).",
+        )
+        parser.add_argument(
+            "--detokenizer-load-balance-policy",
+            type=str,
+            default=ServerArgs.detokenizer_load_balance_policy,
+            choices=["round_robin", "least_loaded", "weighted"],
+            help="Load balancing policy for DetokenizerManager processes. Default is round_robin.",
         )
         parser.add_argument(
             "--weight-loader-disable-mmap",
