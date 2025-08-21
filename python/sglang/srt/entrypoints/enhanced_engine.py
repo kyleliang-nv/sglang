@@ -39,7 +39,22 @@ class EnhancedEngine(Engine):
     def __init__(self, server_args: ServerArgs):
         super().__init__(server_args)
 
-        self.enable_hybrid = server_args.enable_multi_tokenizer
+        # Check if we're in disaggregation mode
+        self.disaggregation_mode = getattr(server_args, "disaggregation_mode", "null")
+        self.is_disaggregated = self.disaggregation_mode != "null"
+
+        # Only enable hybrid mode if not in disaggregation mode
+        self.enable_hybrid = (
+            server_args.enable_multi_tokenizer and not self.is_disaggregated
+        )
+
+        if self.is_disaggregated:
+            logger.info(
+                f"EnhancedEngine running in disaggregation mode: {self.disaggregation_mode}"
+            )
+            logger.info(
+                "Hybrid architecture not supported in disaggregation mode, using standard architecture"
+            )
 
         # Hybrid coordinator
         self.coordinator = None
@@ -370,7 +385,19 @@ class EnhancedEngine(Engine):
 def launch_enhanced_engine(server_args: ServerArgs):
     """Launch the enhanced engine with hybrid architecture support."""
     try:
-        # Create enhanced engine
+        # Check if we're in disaggregation mode
+        disaggregation_mode = getattr(server_args, "disaggregation_mode", "null")
+        is_disaggregated = disaggregation_mode != "null"
+
+        if is_disaggregated:
+            logger.info(f"Running in disaggregation mode: {disaggregation_mode}")
+            logger.info("Using standard launch_server for disaggregation mode")
+            # Import and use standard launch_server for disaggregation mode
+            from sglang.srt.entrypoints.http_server import launch_server
+
+            return launch_server(server_args), None, None
+
+        # Create enhanced engine for non-disaggregated mode
         engine = EnhancedEngine(server_args)
 
         if server_args.enable_multi_tokenizer:
@@ -423,14 +450,29 @@ def main():
 
     try:
         # Launch enhanced engine
-        engine, http_server, coordinator = launch_enhanced_engine(server_args)
+        result = launch_enhanced_engine(server_args)
 
-        if http_server:
-            # Run enhanced HTTP server
-            http_server.run()
+        # Check if we're in disaggregation mode
+        disaggregation_mode = getattr(server_args, "disaggregation_mode", "null")
+        is_disaggregated = disaggregation_mode != "null"
+
+        if is_disaggregated:
+            # In disaggregation mode, launch_server already handles everything
+            logger.info(
+                f"Standard launch_server completed for disaggregation mode: {disaggregation_mode}"
+            )
+            # The launch_server function doesn't return, so we shouldn't reach here
+            return
         else:
-            # Run standard engine
-            engine.run()
+            # Unpack the enhanced engine results
+            engine, http_server, coordinator = result
+
+            if http_server:
+                # Run enhanced HTTP server with hybrid architecture
+                http_server.run()
+            else:
+                # Run standard engine
+                engine.run()
 
     except KeyboardInterrupt:
         logger.info("Received interrupt signal, shutting down...")
