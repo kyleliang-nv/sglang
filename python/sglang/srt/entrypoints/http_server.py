@@ -1130,15 +1130,20 @@ def launch_server_standard_disaggregated(
 
     # Execute warmup for separated process mode
     if not server_args.skip_server_warmup:
-        logger.info("Executing warmup for separated process mode...")
+        logger.info("🚀 DEBUG: Starting warmup execution for separated process mode...")
         try:
             # Wait a bit for processes to be fully ready
             import time
 
+            logger.info("⏳ DEBUG: Waiting 2 seconds for processes to be ready...")
             time.sleep(2)
+            logger.info("✅ DEBUG: Wait complete, now executing warmup...")
 
             # Execute warmup
+            logger.info("🔄 DEBUG: Calling _execute_server_warmup...")
             warmup_success = _execute_server_warmup(server_args, pipe_finish_writer)
+            logger.info(f"📊 DEBUG: _execute_server_warmup returned: {warmup_success}")
+
             if warmup_success:
                 logger.info(
                     "✅ Warmup completed successfully for separated process mode"
@@ -1148,11 +1153,17 @@ def launch_server_standard_disaggregated(
                 logger.error("❌ Warmup failed for separated process mode")
                 raise RuntimeError("Warmup failed")
         except Exception as e:
-            logger.error(f"Warmup error: {e}")
+            logger.error(f"❌ DEBUG: Warmup error caught: {e}")
+            logger.error(f"❌ DEBUG: Error type: {type(e)}")
+            import traceback
+
+            logger.error(f"❌ DEBUG: Full traceback: {traceback.format_exc()}")
             cleanup_handler(signal.SIGINT, None)
             raise
     else:
-        logger.info("Skipping server warmup as requested")
+        logger.info(
+            "⚠️ DEBUG: Skipping server warmup as requested (skip_server_warmup=True)"
+        )
 
     # Log final status
     logger.info(
@@ -1398,15 +1409,24 @@ def launch_server_hybrid_disaggregated(
 
     # Execute warmup for hybrid disaggregation mode
     if not server_args.skip_server_warmup:
-        logger.info("Executing warmup for hybrid disaggregation mode...")
+        logger.info(
+            "🚀 DEBUG: Starting warmup execution for hybrid disaggregation mode..."
+        )
         try:
             # Wait a bit for all processes to be fully ready
             import time
 
+            logger.info(
+                "⏳ DEBUG: Waiting 3 seconds for hybrid workers to initialize..."
+            )
             time.sleep(3)  # Give hybrid workers more time to initialize
+            logger.info("✅ DEBUG: Wait complete, now executing warmup...")
 
             # Execute warmup
+            logger.info("🔄 DEBUG: Calling _execute_server_warmup...")
             warmup_success = _execute_server_warmup(server_args, pipe_finish_writer)
+            logger.info(f"📊 DEBUG: _execute_server_warmup returned: {warmup_success}")
+
             if warmup_success:
                 logger.info(
                     "✅ Warmup completed successfully for hybrid disaggregation mode"
@@ -1416,11 +1436,17 @@ def launch_server_hybrid_disaggregated(
                 logger.error("❌ Warmup failed for hybrid disaggregation mode")
                 raise RuntimeError("Warmup failed")
         except Exception as e:
-            logger.error(f"Warmup error: {e}")
+            logger.error(f"❌ DEBUG: Warmup error caught: {e}")
+            logger.error(f"❌ DEBUG: Error type: {type(e)}")
+            import traceback
+
+            logger.error(f"❌ DEBUG: Full traceback: {traceback.format_exc()}")
             cleanup_handler(signal.SIGINT, None)
             raise
     else:
-        logger.info("Skipping server warmup as requested")
+        logger.info(
+            "⚠️ DEBUG: Skipping server warmup as requested (skip_server_warmup=True)"
+        )
 
     # Wait for processes to complete
     try:
@@ -1528,27 +1554,57 @@ def _execute_server_warmup(
     if server_args.api_key:
         headers["Authorization"] = f"Bearer {server_args.api_key}"
 
+    # Check if we're in disaggregation mode
+    is_disaggregated = server_args.disaggregation_mode != "null"
+
+    if is_disaggregated:
+        logger.info(
+            f"🔄 DEBUG: Disaggregation mode detected: {server_args.disaggregation_mode}"
+        )
+        logger.info(
+            f"🔄 DEBUG: Will wait longer for HTTP server to be ready in separated process mode"
+        )
+
     # Wait until the server is launched
     success = False
-    for _ in range(120):
+    max_wait_time = (
+        300 if is_disaggregated else 120
+    )  # Longer wait for disaggregation mode
+    logger.info(
+        f"⏳ DEBUG: Waiting up to {max_wait_time} seconds for server to be ready..."
+    )
+
+    for attempt in range(max_wait_time):
         time.sleep(1)
         try:
+            logger.debug(
+                f"🔄 DEBUG: Warmup attempt {attempt + 1}/{max_wait_time} - checking /get_model_info..."
+            )
             res = requests.get(url + "/get_model_info", timeout=5, headers=headers)
             assert res.status_code == 200, f"{res=}, {res.text=}"
             success = True
+            logger.info(f"✅ DEBUG: Server is ready after {attempt + 1} seconds")
             break
-        except (AssertionError, requests.exceptions.RequestException):
+        except (AssertionError, requests.exceptions.RequestException) as e:
+            if attempt % 10 == 0:  # Log every 10 seconds
+                logger.info(
+                    f"⏳ DEBUG: Still waiting for server... (attempt {attempt + 1}/{max_wait_time})"
+                )
             last_traceback = get_exception_traceback()
             pass
 
     if not success:
         if pipe_finish_writer is not None:
             pipe_finish_writer.send(last_traceback)
-        logger.error(f"Initialization failed. warmup error: {last_traceback}")
+        logger.error(
+            f"❌ DEBUG: Initialization failed. Server not ready after {max_wait_time} seconds"
+        )
+        logger.error(f"❌ DEBUG: Last error: {last_traceback}")
         kill_process_tree(os.getpid())
         return success
 
     model_info = res.json()
+    logger.info(f"📊 DEBUG: Model info retrieved: {model_info}")
 
     # Send a warmup request
     request_name = "/generate" if model_info["is_generation"] else "/encode"
@@ -1578,6 +1634,9 @@ def _execute_server_warmup(
         ).tolist()
         json_data["sampling_params"]["max_new_tokens"] = 0
 
+    logger.info(f"🔄 DEBUG: Sending warmup request to {url + request_name}")
+    logger.info(f"🔄 DEBUG: Warmup request data: {json_data}")
+
     try:
         if server_args.disaggregation_mode == "null":
             res = requests.post(
@@ -1606,6 +1665,7 @@ def _execute_server_warmup(
                 ],
                 "input_ids": [[0, 1, 2, 3]] * server_args.dp_size,
             }
+            logger.info(f"🔄 DEBUG: Sending disaggregation warmup request...")
             res = requests.post(
                 url + request_name,
                 json=json_data,
@@ -1625,17 +1685,18 @@ def _execute_server_warmup(
                 )
                 _global_state.tokenizer_manager.server_status = ServerStatus.UnHealthy
 
-    except Exception:
+    except Exception as e:
         last_traceback = get_exception_traceback()
+        logger.error(f"❌ DEBUG: Warmup request failed: {e}")
+        logger.error(f"❌ DEBUG: Full traceback: {last_traceback}")
         if pipe_finish_writer is not None:
             pipe_finish_writer.send(last_traceback)
         logger.error(f"Initialization failed. warmup error: {last_traceback}")
         kill_process_tree(os.getpid())
         return False
 
-    # Debug print
-    # logger.info(f"warmup request returns: {res.json()=}")
-    return success
+    logger.info(f"✅ DEBUG: Warmup request completed successfully!")
+    return True
 
 
 def _wait_and_warmup(
