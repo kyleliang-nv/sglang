@@ -56,6 +56,10 @@ concurrent_requests_lock = asyncio.Lock()
 remaining_unsent_requests = 0
 remaining_unsent_requests_lock = asyncio.Lock()
 
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY_BASE = 1.0  # Base delay in seconds
+
 
 async def increment_concurrent_requests():
     """Increment the concurrent request counter and return the new count."""
@@ -99,6 +103,59 @@ def set_remaining_unsent_requests(count: int):
     remaining_unsent_requests = count
 
 
+async def retry_request_with_backoff(
+    request_func, request_func_input, pbar, max_retries=MAX_RETRIES
+):
+    """Retry a request with exponential backoff for transient errors."""
+    last_exception = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return await request_func(request_func_input=request_func_input, pbar=pbar)
+        except (
+            aiohttp.client_exceptions.ClientPayloadError,
+            aiohttp.client_exceptions.ClientError,
+            asyncio.TimeoutError,
+        ) as e:
+            last_exception = e
+
+            if attempt < max_retries:
+                # Calculate delay with exponential backoff
+                delay = RETRY_DELAY_BASE * (2**attempt) + random.uniform(0, 1)
+                logger.warning(
+                    f"⚠️ Request {id(request_func_input)} failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}. "
+                    f"Retrying in {delay:.2f}s..."
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    f"💥 Request {id(request_func_input)} failed after {max_retries + 1} attempts. "
+                    f"Last error: {str(e)}"
+                )
+                # Create a failed output
+                output = RequestFuncOutput.init_new(request_func_input)
+                output.success = False
+                output.error = (
+                    f"Failed after {max_retries + 1} attempts. Last error: {str(e)}"
+                )
+                return output
+        except Exception as e:
+            # For non-retryable errors, don't retry
+            logger.error(
+                f"💥 Request {id(request_func_input)} failed with non-retryable error: {str(e)}"
+            )
+            output = RequestFuncOutput.init_new(request_func_input)
+            output.success = False
+            output.error = str(e)
+            return output
+
+    # This should never be reached, but just in case
+    output = RequestFuncOutput.init_new(request_func_input)
+    output.success = False
+    output.error = f"Unexpected error in retry logic: {str(last_exception)}"
+    return output
+
+
 ASSISTANT_SUFFIX = "Assistant:"
 
 global args
@@ -117,9 +174,27 @@ def _create_bench_client_session():
     BENCH_AIOHTTP_TIMEOUT_SECONDS = 6 * 60 * 60  # 6 hours
     BENCH_AIOHTTP_READ_BUFSIZE_BYTES = 10 * 1024**2  # 10 MB
 
+    # Get keep-alive timeout from command line argument, environment variable, or use default
+    keepalive_timeout = getattr(args, "keepalive_timeout", None)
+    if keepalive_timeout is None:
+        keepalive_timeout = int(
+            os.getenv("SGLANG_KEEPALIVE_TIMEOUT", "300")
+        )  # Default: 5 minutes
+
+    # Create connector with better connection handling
+    connector = aiohttp.TCPConnector(
+        limit=100,  # Total connection pool size
+        limit_per_host=30,  # Max connections per host
+        keepalive_timeout=keepalive_timeout,  # Keep connections alive (configurable)
+        enable_cleanup_closed=True,  # Clean up closed connections
+        ttl_dns_cache=300,  # DNS cache TTL
+    )
+
     aiohttp_timeout = aiohttp.ClientTimeout(total=BENCH_AIOHTTP_TIMEOUT_SECONDS)
     return aiohttp.ClientSession(
-        timeout=aiohttp_timeout, read_bufsize=BENCH_AIOHTTP_READ_BUFSIZE_BYTES
+        timeout=aiohttp_timeout,
+        read_bufsize=BENCH_AIOHTTP_READ_BUFSIZE_BYTES,
+        connector=connector,
     )
 
 
@@ -806,6 +881,27 @@ async def async_request_sglang_generate(
                         logger.error(
                             f"❌ Request {id(request_func_input)} failed with status {response.status}: {output.error}"
                         )
+            except aiohttp.client_exceptions.ClientPayloadError as e:
+                # Handle incomplete HTTP responses (common in high-concurrency scenarios)
+                output.success = False
+                output.error = (
+                    f"ClientPayloadError: Incomplete HTTP response - {str(e)}"
+                )
+                logger.warning(
+                    f"⚠️ Request {id(request_func_input)} failed with incomplete response (ClientPayloadError): {str(e)}"
+                )
+            except aiohttp.client_exceptions.ClientError as e:
+                # Handle other aiohttp client errors
+                output.success = False
+                output.error = f"ClientError: {str(e)}"
+                logger.error(
+                    f"❌ Request {id(request_func_input)} failed with aiohttp client error: {str(e)}"
+                )
+            except asyncio.TimeoutError as e:
+                # Handle timeout errors
+                output.success = False
+                output.error = f"TimeoutError: Request timed out - {str(e)}"
+                logger.error(f"⏰ Request {id(request_func_input)} timed out: {str(e)}")
             except Exception:
                 output.success = False
                 exc_info = sys.exc_info()
@@ -1647,9 +1743,23 @@ async def benchmark(
 
     async def limited_request_func(request_func_input, pbar):
         if semaphore is None:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
+            if args.disable_retry:
+                return await request_func(
+                    request_func_input=request_func_input, pbar=pbar
+                )
+            else:
+                return await retry_request_with_backoff(
+                    request_func, request_func_input, pbar
+                )
         async with semaphore:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
+            if args.disable_retry:
+                return await request_func(
+                    request_func_input=request_func_input, pbar=pbar
+                )
+            else:
+                return await retry_request_with_backoff(
+                    request_func, request_func_input, pbar
+                )
 
     # Warmup
     logger.info(f"🔥 Starting warmup with {warmup_requests} sequences...")
@@ -1677,9 +1787,16 @@ async def benchmark(
     # Run warmup requests
     warmup_tasks = []
     for _ in range(warmup_requests):
-        warmup_tasks.append(
-            asyncio.create_task(request_func(request_func_input=test_input))
-        )
+        if args.disable_retry:
+            warmup_tasks.append(
+                asyncio.create_task(request_func(request_func_input=test_input))
+            )
+        else:
+            warmup_tasks.append(
+                asyncio.create_task(
+                    retry_request_with_backoff(request_func, test_input, None)
+                )
+            )
 
     warmup_outputs = await asyncio.gather(*warmup_tasks)
 
@@ -1697,7 +1814,29 @@ async def benchmark(
     # Flush cache
     if ("sglang" in backend and _get_bool_env_var("SGLANG_IS_IN_CI")) or flush_cache:
         logger.info("🧹 Flushing cache before benchmark...")
-        requests.post(base_url + "/flush_cache", headers=get_auth_headers())
+        try:
+            response = requests.post(
+                base_url + "/flush_cache", headers=get_auth_headers(), timeout=30
+            )
+            if response.status_code == 200:
+                logger.info("✅ Cache flushed successfully")
+            else:
+                logger.warning(f"⚠️ Cache flush returned status {response.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ Cache flush failed: {e}")
+
+    # Check server health
+    logger.info("🏥 Checking server health before benchmark...")
+    try:
+        health_response = requests.get(base_url + "/health", timeout=10)
+        if health_response.status_code == 200:
+            logger.info("✅ Server health check passed")
+        else:
+            logger.warning(
+                f"⚠️ Server health check returned status {health_response.status_code}"
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Server health check failed: {e}")
 
     time.sleep(1.0)
 
@@ -1942,6 +2081,12 @@ async def benchmark(
     logger.info(
         f"   • Max concurrency limit: {max_concurrency if max_concurrency else 'unlimited'}"
     )
+
+    # Log retry configuration
+    if not args.disable_retry:
+        logger.info(f"   • Retry mechanism: Enabled (max {MAX_RETRIES} retries)")
+    else:
+        logger.info(f"   • Retry mechanism: Disabled")
 
     # Determine output file name
     if args.output_file:
@@ -2302,6 +2447,17 @@ if __name__ == "__main__":
         "--disable-stream",
         action="store_true",
         help="Disable streaming mode.",
+    )
+    parser.add_argument(
+        "--disable-retry",
+        action="store_true",
+        help="Disable automatic retry for failed requests.",
+    )
+    parser.add_argument(
+        "--keepalive-timeout",
+        type=int,
+        default=300,
+        help="Keep-alive timeout in seconds for HTTP connections (default: 300).",
     )
     parser.add_argument(
         "--return-logprob",
