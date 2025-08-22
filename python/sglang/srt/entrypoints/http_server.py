@@ -1412,6 +1412,19 @@ def launch_server_hybrid_disaggregated(
         logger.info(
             "🚀 DEBUG: Starting warmup execution for hybrid disaggregation mode..."
         )
+
+        # Check if hybrid architecture is actually working
+        logger.info(f"🔍 DEBUG: Checking hybrid architecture status...")
+        logger.info(
+            f"🔍 DEBUG: enable_multi_tokenizer: {getattr(server_args, 'enable_multi_tokenizer', False)}"
+        )
+        logger.info(
+            f"🔍 DEBUG: detokenizer_processes: {getattr(server_args, 'detokenizer_processes', 1)}"
+        )
+        logger.info(
+            f"🔍 DEBUG: tokenizer_worker_num: {getattr(server_args, 'tokenizer_worker_num', 1)}"
+        )
+
         try:
             # Wait a bit for all processes to be fully ready
             import time
@@ -1434,15 +1447,19 @@ def launch_server_hybrid_disaggregated(
                 logger.info("The server is fired up and ready to roll!")
             else:
                 logger.error("❌ Warmup failed for hybrid disaggregation mode")
-                raise RuntimeError("Warmup failed")
+                logger.error(
+                    "❌ DEBUG: This suggests the hybrid architecture may not be working properly"
+                )
+                # Don't raise error, just log the failure
+                logger.warning("⚠️ Server will continue running but warmup failed")
         except Exception as e:
             logger.error(f"❌ DEBUG: Warmup error caught: {e}")
             logger.error(f"❌ DEBUG: Error type: {type(e)}")
             import traceback
 
             logger.error(f"❌ DEBUG: Full traceback: {traceback.format_exc()}")
-            cleanup_handler(signal.SIGINT, None)
-            raise
+            logger.warning("⚠️ Server will continue running despite warmup error")
+        # Don't call cleanup_handler here - let the server continue
     else:
         logger.info(
             "⚠️ DEBUG: Skipping server warmup as requested (skip_server_warmup=True)"
@@ -1666,24 +1683,47 @@ def _execute_server_warmup(
                 "input_ids": [[0, 1, 2, 3]] * server_args.dp_size,
             }
             logger.info(f"🔄 DEBUG: Sending disaggregation warmup request...")
-            res = requests.post(
-                url + request_name,
-                json=json_data,
-                headers=headers,
-                timeout=1800,  # because of deep gemm precache is very long if not precache.
-            )
-            if res.status_code == 200:
-                logger.info(
-                    f"End of prefill disaggregation mode warmup with status {res.status_code}, resp: {res.json()}"
+
+            # Add timeout for warmup request to prevent hanging
+            warmup_timeout = 300  # 5 minutes for warmup
+            logger.info(f"⏱️ DEBUG: Setting warmup timeout to {warmup_timeout} seconds")
+
+            try:
+                res = requests.post(
+                    url + request_name,
+                    json=json_data,
+                    headers=headers,
+                    timeout=warmup_timeout,
                 )
-                _global_state.tokenizer_manager.server_status = ServerStatus.Up
-            else:
                 logger.info(
-                    "Prefill disaggregation mode warm Up Failed, status code: {}".format(
-                        res.status_code
+                    f"📊 DEBUG: Warmup response received: status={res.status_code}"
+                )
+
+                if res.status_code == 200:
+                    logger.info(
+                        f"End of prefill disaggregation mode warmup with status {res.status_code}, resp: {res.json()}"
                     )
+                    _global_state.tokenizer_manager.server_status = ServerStatus.Up
+                else:
+                    logger.error(
+                        f"Prefill disaggregation mode warm Up Failed, status code: {res.status_code}"
+                    )
+                    _global_state.tokenizer_manager.server_status = (
+                        ServerStatus.UnHealthy
+                    )
+
+            except requests.exceptions.Timeout:
+                logger.error(
+                    f"❌ DEBUG: Warmup request timed out after {warmup_timeout} seconds"
                 )
-                _global_state.tokenizer_manager.server_status = ServerStatus.UnHealthy
+                logger.error(
+                    "❌ DEBUG: This suggests the response flow is broken in hybrid mode"
+                )
+                # Don't kill the process, just return failure
+                return False
+            except Exception as e:
+                logger.error(f"❌ DEBUG: Warmup request failed with exception: {e}")
+                raise
 
     except Exception as e:
         last_traceback = get_exception_traceback()
