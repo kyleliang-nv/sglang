@@ -244,23 +244,36 @@ class PrefillConfig:
 
 
 class MiniLoadBalancer:
-    def __init__(self, prefill_configs: List[PrefillConfig], decode_servers: List[str]):
+    def __init__(
+        self,
+        prefill_configs: List[PrefillConfig],
+        decode_servers: List[str],
+        policy: str = "random",
+    ):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
+        self.policy = policy
+        # Initialize round-robin counters
+        self.prefill_counter = 0
+        self.decode_counter = 0
         logger.info(
-            f"MiniLoadBalancer initialized with {len(self.prefill_configs)} prefill servers and {len(self.decode_servers)} decode servers"
+            f"MiniLoadBalancer initialized with {len(self.prefill_configs)} prefill servers and {len(self.decode_servers)} decode servers using {policy} policy"
         )
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
         self.prefill_servers.append(new_prefill_config.url)
+        # Reset counter to ensure fair distribution with new server
+        self.prefill_counter = 0
         logger.info(
             f"Added prefill server: {new_prefill_config.url} (total: {len(self.prefill_servers)})"
         )
 
     def add_decode_server(self, new_decode_server: str):
         self.decode_servers.append(new_decode_server)
+        # Reset counter to ensure fair distribution with new server
+        self.decode_counter = 0
         logger.info(
             f"Added decode server: {new_decode_server} (total: {len(self.decode_servers)})"
         )
@@ -269,17 +282,66 @@ class MiniLoadBalancer:
         """Get streaming request statistics."""
         return get_streaming_stats()
 
+    def get_round_robin_state(self) -> Dict[str, any]:
+        """Get current round-robin state for debugging."""
+        return {
+            "policy": self.policy,
+            "prefill_counter": self.prefill_counter,
+            "decode_counter": self.decode_counter,
+            "prefill_servers_count": len(self.prefill_servers),
+            "decode_servers_count": len(self.decode_servers),
+            "next_prefill_index": (
+                self.prefill_counter % len(self.prefill_servers)
+                if self.prefill_servers
+                else None
+            ),
+            "next_decode_index": (
+                self.decode_counter % len(self.decode_servers)
+                if self.decode_servers
+                else None
+            ),
+        }
+
+    def get_policy(self) -> str:
+        """Get current load balancing policy."""
+        return self.policy
+
     def select_pair(self):
         # TODO: return some message instead of panic
         assert len(self.prefill_configs) > 0, "No prefill servers available"
         assert len(self.decode_servers) > 0, "No decode servers available"
 
-        prefill_config = random.choice(self.prefill_configs)
-        decode_server = random.choice(self.decode_servers)
+        if self.policy == "round_robin":
+            # Round-robin selection for prefill servers
+            prefill_config = self.prefill_configs[
+                self.prefill_counter % len(self.prefill_configs)
+            ]
+            self.prefill_counter += 1
+
+            # Round-robin selection for decode servers
+            decode_server = self.decode_servers[
+                self.decode_counter % len(self.decode_servers)
+            ]
+            self.decode_counter += 1
+        else:  # random policy
+            # Random selection for prefill servers
+            prefill_config = random.choice(self.prefill_configs)
+            # Random selection for decode servers
+            decode_server = random.choice(self.decode_servers)
+
         if ENABLE_DEBUG_LOGGING:
             logger.debug(
-                f"Selected prefill: {prefill_config.url}, decode: {decode_server}"
+                f"Selected prefill: {prefill_config.url}, decode: {decode_server} using {self.policy} policy"
             )
+
+        # Log policy usage for monitoring
+        if self.policy == "round_robin":
+            logger.debug(
+                f"Round-robin selection - prefill counter: {self.prefill_counter-1}, decode counter: {self.decode_counter-1}"
+            )
+        else:
+            logger.debug(f"Random selection completed")
+
         return prefill_config.url, prefill_config.bootstrap_port, decode_server
 
     async def generate(
@@ -607,6 +669,44 @@ async def get_streaming_stats():
     logger.info(f"Streaming stats: {stats}")
 
     return {"streaming_stats": stats, "timestamp": time.time()}
+
+
+@app.get("/get_round_robin_state")
+async def get_round_robin_state():
+    """Get current round-robin state for debugging."""
+    logger.debug("Get round-robin state endpoint called")
+
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for get round-robin state")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
+    try:
+        state = load_balancer.get_round_robin_state()
+        logger.info(f"Round-robin state: {state}")
+
+        return {"round_robin_state": state, "timestamp": time.time()}
+    except Exception as e:
+        logger.error(f"Failed to get round-robin state: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/get_policy")
+async def get_policy():
+    """Get current load balancing policy."""
+    logger.debug("Get policy endpoint called")
+
+    if load_balancer is None:
+        logger.error("Load balancer not initialized for get policy")
+        raise HTTPException(status_code=500, detail="Load balancer not ready")
+
+    try:
+        policy = load_balancer.get_policy()
+        logger.info(f"Current policy: {policy}")
+
+        return {"policy": policy, "timestamp": time.time()}
+    except Exception as e:
+        logger.error(f"Failed to get policy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/clear_streaming_requests")
@@ -960,6 +1060,7 @@ def run(
     decode_addrs,
     host,
     port,
+    policy="random",
     log_level="INFO",
     log_file=None,
     log_format="detailed",
@@ -977,7 +1078,7 @@ def run(
     logger.info(f"Initial prefill configs: {prefill_configs}")
     logger.info(f"Initial decode addresses: {decode_addrs}")
 
-    load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs)
+    load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs, policy)
     logger.info("Load balancer initialized successfully")
 
     uvicorn.run(app, host=host, port=port)
