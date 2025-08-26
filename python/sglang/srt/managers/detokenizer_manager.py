@@ -272,22 +272,30 @@ def run_detokenizer_process(
     parent_process = psutil.Process().parent()
 
     try:
-        # Check if hybrid mode is enabled
         enable_hybrid = getattr(server_args, "enable_multi_tokenizer", False)
-
         if enable_hybrid:
             logger.info(
-                f"🚀 Starting DetokenizerManager worker {worker_id} in hybrid mode"
+                f"🚀 Starting EnhancedDetokenizerManager worker {worker_id} in hybrid mode"
             )
-            # TODO: Use EnhancedDetokenizerManager when available
-            manager = DetokenizerManager(server_args, port_args)
-            logger.info(
-                f"✅ DetokenizerManager worker {worker_id} initialized in hybrid mode"
-            )
+            try:
+                from sglang.srt.managers.enhanced_detokenizer_manager import (
+                    EnhancedDetokenizerManager,
+                )
+
+                manager = EnhancedDetokenizerManager(server_args, port_args, worker_id)
+                logger.info(
+                    f"✅ EnhancedDetokenizerManager worker {worker_id} initialized in hybrid mode"
+                )
+                manager.run()
+            except ImportError:
+                logger.warning(
+                    f"⚠️ EnhancedDetokenizerManager not available, falling back to standard DetokenizerManager for worker {worker_id}"
+                )
+                manager = DetokenizerManager(server_args, port_args)
+                manager.event_loop()
         else:
             manager = DetokenizerManager(server_args, port_args)
-
-        manager.event_loop()
+            manager.event_loop()
     except Exception:
         traceback = get_exception_traceback()
         logger.error(
