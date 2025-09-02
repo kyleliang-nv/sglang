@@ -1404,8 +1404,12 @@ async def benchmark(
 
     # Run all requests
     benchmark_start_time = time.perf_counter()
+
+    # OPTIMIZATION: Pre-create all tasks to minimize gap between request finish and start
+    print(f"Pre-creating {len(input_requests)} tasks...")
     tasks: List[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate):
+
+    for i, request in enumerate(input_requests):
         if lora_names is not None and len(lora_names) != 0:
             idx = random.randint(0, len(lora_names) - 1)
             lora_name = lora_names[idx]
@@ -1423,11 +1427,13 @@ async def benchmark(
             extra_request_body=extra_request_body,
         )
 
-        tasks.append(
-            asyncio.create_task(
-                limited_request_func(request_func_input=request_func_input, pbar=pbar)
-            )
+        # Create task immediately (no delay between requests)
+        task = asyncio.create_task(
+            limited_request_func(request_func_input=request_func_input, pbar=pbar)
         )
+        tasks.append(task)
+
+    print(f"Created {len(tasks)} tasks. Starting concurrent execution...")
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     # Stop profiler
@@ -1774,7 +1780,7 @@ def run_benchmark(args_: argparse.Namespace):
     )
 
 
-def set_ulimit(target_soft_limit=65535):
+def set_ulimit(target_soft_limit=131072):
     resource_type = resource.RLIMIT_NOFILE
     current_soft, current_hard = resource.getrlimit(resource_type)
 
