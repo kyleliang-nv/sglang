@@ -103,7 +103,9 @@ RUN cd /sgl-workspace/nvshmem && \
 
 # Install DeepEP
 RUN cd /sgl-workspace/DeepEP && \
-    NVSHMEM_DIR=${NVSHMEM_DIR} pip install .
+    NVSHMEM_DIR=${NVSHMEM_DIR} \
+    LD_LIBRARY_PATH=${NVSHMEM_DIR}/lib:${LD_LIBRARY_PATH} \
+    pip install .
 
 # Python tools
 RUN python3 -m pip install --no-cache-dir \
