@@ -129,6 +129,10 @@ class HttpResponse:
     def status_code(self):
         return self.resp.status
 
+    @property
+    def text(self):
+        return self.resp.read().decode("utf-8")
+
 
 def http_request(
     url,
