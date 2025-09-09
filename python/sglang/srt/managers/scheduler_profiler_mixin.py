@@ -341,6 +341,10 @@ class SchedulerProfilerMixin:
             assert not self.enable_pyt_hooks, "Inconsistent CUDA profiling state"
             ANNAProfControl.profiler_start()
             self.enable_pyt_hooks = True
+        else:
+            logger.debug(
+                f"profile_step [{self.attn_tp_rank}-{self.tp_rank}]. iter: {self.forward_ct}. Not starting profiling. enable_pyt_hooks:{self.enable_pyt_hooks:}, start:{self.profiler_start_iters:}, end:{self.profiler_stop_iters:}"
+            )
 
     def check_profile_stop(self):
         if self.forward_ct in self.profiler_stop_iters and self.enable_pyt_hooks:
@@ -350,3 +354,7 @@ class SchedulerProfilerMixin:
             assert self.enable_pyt_hooks, "Inconsistent CUDA profiling state"
             ANNAProfControl.profiler_stop(exit_program=False)
             self.enable_pyt_hooks = False
+        else:
+            logger.debug(
+                f"profile_step [{self.attn_tp_rank}-{self.tp_rank}]. iter: {self.forward_ct}. Not stopping profiling. enable_pyt_hooks:{self.enable_pyt_hooks:}, start:{self.profiler_start_iters:}, end:{self.profiler_stop_iters:}"
+            )
