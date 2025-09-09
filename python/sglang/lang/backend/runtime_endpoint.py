@@ -344,7 +344,14 @@ class RuntimeEndpoint(BaseBackend):
                 content = res.json()
             except json.JSONDecodeError:
                 content = res.text
-            raise RuntimeError(content)
+
+            # Provide more detailed error information
+            error_msg = (
+                f"HTTP {res.status_code}: {content}"
+                if content
+                else f"HTTP {res.status_code}: No response content"
+            )
+            raise RuntimeError(error_msg)
 
 
 def compute_normalized_prompt_logprobs(input_logprobs):

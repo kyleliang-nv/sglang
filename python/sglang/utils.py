@@ -121,9 +121,15 @@ def dump_state_text(filename: str, states: list, mode: str = "w"):
 class HttpResponse:
     def __init__(self, resp):
         self.resp = resp
+        self._content = None
+
+    def _get_content(self):
+        if self._content is None:
+            self._content = self.resp.read()
+        return self._content
 
     def json(self):
-        return json.loads(self.resp.read())
+        return json.loads(self._get_content())
 
     @property
     def status_code(self):
@@ -131,7 +137,7 @@ class HttpResponse:
 
     @property
     def text(self):
-        return self.resp.read().decode("utf-8")
+        return self._get_content().decode("utf-8")
 
 
 def http_request(
