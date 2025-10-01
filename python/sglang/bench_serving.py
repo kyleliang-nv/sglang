@@ -1770,9 +1770,20 @@ async def benchmark(
             server_info_json = server_info.json()
             if "decode" in server_info_json:
                 server_info_json = server_info_json["decode"][0]
-            accept_length = server_info_json["internal_states"][0].get(
-                "avg_spec_accept_length", None
-            )
+
+            # Safely access internal_states with error handling
+            try:
+                if (
+                    "internal_states" in server_info_json
+                    and len(server_info_json["internal_states"]) > 0
+                ):
+                    accept_length = server_info_json["internal_states"][0].get(
+                        "avg_spec_accept_length", None
+                    )
+                else:
+                    accept_length = None
+            except (KeyError, IndexError, TypeError):
+                accept_length = None
         else:
             accept_length = None
     else:
