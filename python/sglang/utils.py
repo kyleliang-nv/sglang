@@ -124,11 +124,18 @@ class HttpResponse:
         self.resp = resp
 
     def json(self):
-        return json.loads(self.resp.read())
+        content = self.resp.read()
+        if not content:
+            raise json.JSONDecodeError("Empty response", "", 0)
+        return json.loads(content)
 
     @property
     def status_code(self):
         return self.resp.status
+
+    @property
+    def text(self):
+        return self.resp.read().decode("utf-8")
 
 
 def http_request(
