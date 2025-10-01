@@ -122,9 +122,15 @@ def dump_state_text(filename: str, states: list, mode: str = "w"):
 class HttpResponse:
     def __init__(self, resp):
         self.resp = resp
+        self._content = None
+
+    def _read_content(self):
+        if self._content is None:
+            self._content = self.resp.read()
+        return self._content
 
     def json(self):
-        content = self.resp.read()
+        content = self._read_content()
         if not content:
             raise json.JSONDecodeError("Empty response", "", 0)
         return json.loads(content)
@@ -135,7 +141,8 @@ class HttpResponse:
 
     @property
     def text(self):
-        return self.resp.read().decode("utf-8")
+        content = self._read_content()
+        return content.decode("utf-8")
 
 
 def http_request(
