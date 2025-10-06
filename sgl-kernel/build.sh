@@ -20,7 +20,10 @@ else
    BUILDER_NAME="pytorch/manylinux2_28-builder"
 fi
 
-if [ ${CUDA_VERSION} = "12.9" ]; then
+if [ ${CUDA_VERSION} = "13.0" ]; then
+   DOCKER_IMAGE="${BUILDER_NAME}:cuda${CUDA_VERSION}"
+   TORCH_INSTALL="pip install --no-cache-dir torch==2.9.0.dev20250828 --index-url https://download.pytorch.org/whl/nightly/cu130"
+elif [ ${CUDA_VERSION} = "12.9" ]; then
    DOCKER_IMAGE="${BUILDER_NAME}:cuda${CUDA_VERSION}"
    TORCH_INSTALL="pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu129"
 elif [ ${CUDA_VERSION} = "12.8" ]; then
@@ -45,6 +48,7 @@ docker run --rm \
       export MAKEFLAGS='-j2'
       export CMAKE_BUILD_PARALLEL_LEVEL=2
       export NINJAFLAGS='-j2'
+      export CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl
    fi
    echo \"Downloading CMake from: https://cmake.org/files/v\${CMAKE_VERSION_MAJOR}/cmake-\${CMAKE_VERSION_MAJOR}.\${CMAKE_VERSION_MINOR}-linux-${ARCH}.tar.gz\"
    wget https://cmake.org/files/v\${CMAKE_VERSION_MAJOR}/cmake-\${CMAKE_VERSION_MAJOR}.\${CMAKE_VERSION_MINOR}-linux-${ARCH}.tar.gz
