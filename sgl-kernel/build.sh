@@ -43,13 +43,20 @@ docker run --rm \
    export CMAKE_VERSION_MINOR=1
    # Setting these flags to reduce OOM chance only on ARM
    export CMAKE_BUILD_PARALLEL_LEVEL=$(( $(nproc)/3 < 48 ? $(nproc)/3 : 48 ))
+   export CUDA_VERSION=${CUDA_VERSION}
    if [ \"${ARCH}\" = \"aarch64\" ]; then
       export CUDA_NVCC_FLAGS=\"-Xcudafe --threads=2\"
       export MAKEFLAGS='-j2'
       export CMAKE_BUILD_PARALLEL_LEVEL=2
       export NINJAFLAGS='-j2'
       export CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl
+      export TORCH_CUDA_ARCH_LIST='10.0 10.3'
+   else
+      export TORCH_CUDA_ARCH_LIST='8.0 8.9 9.0+PTX'
    fi
+
+   echo \"TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}\"
+
    echo \"Downloading CMake from: https://cmake.org/files/v\${CMAKE_VERSION_MAJOR}/cmake-\${CMAKE_VERSION_MAJOR}.\${CMAKE_VERSION_MINOR}-linux-${ARCH}.tar.gz\"
    wget https://cmake.org/files/v\${CMAKE_VERSION_MAJOR}/cmake-\${CMAKE_VERSION_MAJOR}.\${CMAKE_VERSION_MINOR}-linux-${ARCH}.tar.gz
    tar -xzf cmake-\${CMAKE_VERSION_MAJOR}.\${CMAKE_VERSION_MINOR}-linux-${ARCH}.tar.gz
