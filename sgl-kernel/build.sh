@@ -55,7 +55,7 @@ docker run --rm \
       export TORCH_CUDA_ARCH_LIST='8.0 8.9 9.0+PTX'
    fi
 
-   echo \"TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}\"
+   echo \"TORCH_CUDA_ARCH_LIST=\${TORCH_CUDA_ARCH_LIST}\"
 
    echo \"Downloading CMake from: https://cmake.org/files/v\${CMAKE_VERSION_MAJOR}/cmake-\${CMAKE_VERSION_MAJOR}.\${CMAKE_VERSION_MINOR}-linux-${ARCH}.tar.gz\"
    wget https://cmake.org/files/v\${CMAKE_VERSION_MAJOR}/cmake-\${CMAKE_VERSION_MAJOR}.\${CMAKE_VERSION_MINOR}-linux-${ARCH}.tar.gz
