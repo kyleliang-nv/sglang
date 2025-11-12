@@ -393,6 +393,12 @@ def add_common_sglang_args_and_parse(parser: argparse.ArgumentParser):
     )
     parser.add_argument("--result-file", type=str, default="result.jsonl")
     parser.add_argument("--raw-result-file", type=str)
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Model path to use (bypasses /get_model_info endpoint). Useful for routers or endpoints that don't support get_model_info",
+    )
     args = parser.parse_args()
 
     return args
@@ -405,7 +411,8 @@ def select_sglang_backend(args: argparse.Namespace):
     if args.backend.startswith("srt"):
         if args.backend == "srt-no-parallel":
             global_config.enable_parallel_encoding = False
-        backend = RuntimeEndpoint(f"{args.host}:{args.port}")
+        model_path = getattr(args, "model_path", None)
+        backend = RuntimeEndpoint(f"{args.host}:{args.port}", model_path=model_path)
     elif args.backend.startswith("gpt-"):
         backend = OpenAI(args.backend)
     else:

@@ -29,6 +29,7 @@ class RuntimeEndpoint(BaseBackend):
         api_key: Optional[str] = None,
         verify: Optional[str] = None,
         chat_template_name: Optional[str] = None,
+        model_path: Optional[str] = None,
     ):
         super().__init__()
         self.support_concate_and_append = True
@@ -37,13 +38,17 @@ class RuntimeEndpoint(BaseBackend):
         self.api_key = api_key
         self.verify = verify
 
-        res = http_request(
-            self.base_url + "/get_model_info",
-            api_key=self.api_key,
-            verify=self.verify,
-        )
-        self._assert_success(res)
-        self.model_info = res.json()
+        # If model_path is provided, skip the get_model_info call
+        if model_path:
+            self.model_info = {"model_path": model_path}
+        else:
+            res = http_request(
+                self.base_url + "/get_model_info",
+                api_key=self.api_key,
+                verify=self.verify,
+            )
+            self._assert_success(res)
+            self.model_info = res.json()
 
         if chat_template_name:
             self.chat_template = get_chat_template(chat_template_name)

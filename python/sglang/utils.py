@@ -129,6 +129,10 @@ class HttpResponse:
         return json.loads(self.resp.read())
 
     @property
+    def text(self):
+        return self.resp.read().decode("utf-8")
+
+    @property
     def status_code(self):
         return self.resp.status
 
